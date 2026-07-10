@@ -589,8 +589,8 @@ func styleDiffLine(line string, width int) string {
 func (m model) renderHelp() string {
 	rows := [][2]string{
 		{"1 / 2 / 3", "commits · status · branches"},
-		{"tab / ← →", "switch pane focus"},
-		{"j k / ↑ ↓", "move selection / scroll"},
+		{"tab / ← → / a d", "switch pane focus"},
+		{"↑ ↓ / w s / j k", "move selection / scroll"},
 		{"ctrl+d ctrl+u", "half-page down / up"},
 		{"g / G", "jump to top / bottom"},
 		{"enter", "focus diff · checkout branch"},
@@ -605,7 +605,7 @@ func (m model) renderHelp() string {
 	b.WriteString(sBright.Render("git2 — keyboard reference") + "\n\n")
 	for _, r := range rows {
 		b.WriteString(fmt.Sprintf("%s  %s\n",
-			sHelpKey.Width(14).Render(r[0]), sText.Render(r[1])))
+			sHelpKey.Width(17).Render(r[0]), sText.Render(r[1])))
 	}
 	return sHelpBox.Render(strings.TrimRight(b.String(), "\n"))
 }

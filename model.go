@@ -486,10 +486,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.switchView(viewStatus)
 	case "3":
 		return m.switchView(viewBranches)
-	case "tab", "left", "right", "h", "l":
-		if key == "left" || key == "h" {
+	case "tab", "left", "right", "h", "l", "a", "d":
+		if key == "left" || key == "h" || key == "a" {
 			m.focus = focusLeft
-		} else if key == "right" || key == "l" {
+		} else if key == "right" || key == "l" || key == "d" {
 			m.focus = focusRight
 		} else if m.focus == focusLeft {
 			m.focus = focusRight
@@ -527,9 +527,9 @@ func (m model) handleCommitsKey(key string) (tea.Model, tea.Cmd) {
 	if m.focus == focusRight {
 		maxOff := max(len(m.details)-m.listHeight(), 0)
 		switch key {
-		case "j", "down":
+		case "j", "s", "down":
 			m.detailOff = min(m.detailOff+1, maxOff)
-		case "k", "up":
+		case "k", "w", "up":
 			m.detailOff = max(m.detailOff-1, 0)
 		case "ctrl+d", "pgdown", " ":
 			m.detailOff = min(m.detailOff+page/2, maxOff)
@@ -545,9 +545,9 @@ func (m model) handleCommitsKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch key {
-	case "j", "down":
+	case "j", "s", "down":
 		return m.moveSel(1)
-	case "k", "up":
+	case "k", "w", "up":
 		return m.moveSel(-1)
 	case "ctrl+d", "pgdown":
 		return m.moveSel(page / 2)
@@ -580,9 +580,9 @@ func (m model) handleStatusKey(key string) (tea.Model, tea.Cmd) {
 	if m.focus == focusRight {
 		maxOff := max(len(m.fileDiff)-m.listHeight(), 0)
 		switch key {
-		case "j", "down":
+		case "j", "s", "down":
 			m.diffOff = min(m.diffOff+1, maxOff)
-		case "k", "up":
+		case "k", "w", "up":
 			m.diffOff = max(m.diffOff-1, 0)
 		case "ctrl+d", "pgdown", " ":
 			m.diffOff = min(m.diffOff+page/2, maxOff)
@@ -610,9 +610,9 @@ func (m model) handleStatusKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch key {
-	case "j", "down":
+	case "j", "s", "down":
 		return moveFile(1)
-	case "k", "up":
+	case "k", "w", "up":
 		return moveFile(-1)
 	case "ctrl+d", "pgdown":
 		return moveFile(page / 2)
@@ -622,7 +622,7 @@ func (m model) handleStatusKey(key string) (tea.Model, tea.Cmd) {
 		return moveFile(-len(m.files))
 	case "G", "end":
 		return moveFile(len(m.files))
-	case " ", "s":
+	case " ":
 		if len(m.files) == 0 {
 			return m, nil
 		}
@@ -657,9 +657,9 @@ func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 	if m.focus == focusRight {
 		maxOff := max(len(m.brLog)-m.listHeight(), 0)
 		switch key {
-		case "j", "down":
+		case "j", "s", "down":
 			m.brLogOff = min(m.brLogOff+1, maxOff)
-		case "k", "up":
+		case "k", "w", "up":
 			m.brLogOff = max(m.brLogOff-1, 0)
 		case "ctrl+d", "pgdown", " ":
 			m.brLogOff = min(m.brLogOff+page/2, maxOff)
@@ -687,9 +687,9 @@ func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch key {
-	case "j", "down":
+	case "j", "s", "down":
 		return moveBr(1)
-	case "k", "up":
+	case "k", "w", "up":
 		return moveBr(-1)
 	case "ctrl+d", "pgdown":
 		return moveBr(page / 2)

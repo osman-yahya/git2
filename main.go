@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	path := "."
@@ -34,16 +34,41 @@ func main() {
 		}
 	}
 
+	state := loadState()
+
 	repo, err := findRepo(path)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "git2: "+err.Error())
-		os.Exit(1)
+		if printMode {
+			fmt.Fprintln(os.Stderr, "git2: "+err.Error())
+			os.Exit(1)
+		}
+		// not inside a repo: open the picker instead of bailing out
+		lipgloss.SetHasDarkBackground(lipgloss.HasDarkBackground())
+		picked, perr := runPicker(state)
+		if perr != nil {
+			fmt.Fprintln(os.Stderr, "git2: "+perr.Error())
+			os.Exit(1)
+		}
+		state.LastDir = picked.dir
+		if picked.choice == "" {
+			saveState(state)
+			return
+		}
+		repo, err = findRepo(picked.choice)
+		if err != nil {
+			saveState(state)
+			fmt.Fprintln(os.Stderr, "git2: "+err.Error())
+			os.Exit(1)
+		}
 	}
 
 	if printMode {
 		printGraph(repo, printLimit)
 		return
 	}
+
+	state.Touch(repo.Root)
+	saveState(state)
 
 	// resolve light/dark background once, before bubbletea owns stdin
 	lipgloss.SetHasDarkBackground(lipgloss.HasDarkBackground())
@@ -59,7 +84,9 @@ func usage() {
 	fmt.Println(`git2 — a beautiful terminal git client
 
 usage:
-  git2 [path]        open the repo at path (default: current directory)
+  git2 [path]        open the repo at path (default: current directory);
+                     outside a repo, a picker offers recent repos and a
+                     directory browser
   git2 -p, --print   print the commit graph and exit
   git2 -v, --version print version`)
 }
