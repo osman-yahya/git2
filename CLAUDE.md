@@ -41,8 +41,14 @@ gofmt -w . && go vet ./...
   `checkoutBlockedMsg`). All checkouts go through `m.doCheckout` so the popup logic
   stays centralized.
 - Key aliases everywhere: arrows / `w s a d` / `j k h l`. `s` means *down*, so it can't
-  be a mnemonic (stage = `space`, stash = `S`). New keys must be added to the footer
-  hints and the `?` help overlay in views.go, plus docs/usage.md and README.
+  be a mnemonic (stage = `space`, stash = `S`). `tab` cycles views (not panes!); panes
+  are `← → / a d / h l`. New keys must be added to the footer hints and the `?` help
+  overlay in views.go, plus docs/usage.md and README.
+- Flash messages via `m.setFlash()` only (auto-cleared by flashTick after ~4s); never
+  assign m.flash directly.
+- The status list is items+rows (`rebuildStatusRows`): selectable statusItems (files,
+  then stashes) rendered through statusRows with section/directory headers at item==-1.
+  Selection is item-indexed; scrolling is row-indexed via `itemRow`.
 - Force push is always `--force-with-lease`; pull is always `--ff-only`.
 - Machine-readable git output uses `%x1f` field / `%x1e` record separators.
 
@@ -72,6 +78,11 @@ For remote-feature tests, use a local bare repo (`git init --bare origin.git`) a
   remote HEADs by the FULL refname or a phantom "origin" branch appears whose checkout
   detaches HEAD.
 - Never drive the `O` (open PR) key in PTY tests — it really opens the user's browser.
+- The View is a strict height budget: header 1 + tab bar 2 (label + underline) + body
+  (`bodyHeight` = h-4) + footer 1. If any bar wraps (long footer hints!) bubbletea trims
+  the TOP line — the header silently disappears. Keep footers MaxHeight(1) and short.
+- `git status --porcelain` shows untracked dirs as one `dir/` entry — always pass `-uall`.
+- Mouse row mapping starts at msg.Y-4 (header + 2-line tabs + border).
 
 ## Release process
 

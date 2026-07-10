@@ -21,9 +21,11 @@ it offers your recent repos and a directory browser to pick one.
 
 - **Commit graph** — colored branch lanes with rounded connectors, ref badges for HEAD,
   branches, remotes and tags, live search (`/`), full colorized patch in the details pane
-- **Commit actions** — checkout, merge, cherry-pick, rebase, revert right from the graph;
-  blocked by local changes? A popup offers stash-and-reapply or discard
-- **Status view** — stage/unstage with `space`, per-file diffs, commit with `c`
+- **Commit actions** — checkout, merge, cherry-pick, rebase, revert, branch right from the
+  graph; blocked by local changes? A popup offers stash-and-reapply or discard. `b` switches
+  branch in place, `t` focuses the graph on the current branch
+- **Status view** — file tree with clean per-file diffs, stage/unstage with `space` or
+  double-click, stashes gathered at the bottom, conflict resolution + merge abort/commit
 - **Branches view** — local + remote branches with ahead/behind, checkout with `enter`,
   merge with `m`, open a pull-request page with `O`
 - **Remotes & syncing** — add origin from the TUI, fetch (`f`) with autofetch every 3 min,
@@ -77,7 +79,8 @@ See the **[usage guide](docs/usage.md)** for the picker, views, and every keybin
 | Key | Action |
 | --- | --- |
 | `↑ ↓` / `w s` / `j k` | move · scroll |
-| `← →` / `a d` / `tab` | switch pane |
+| `tab` | next view |
+| `← →` / `a d` | switch pane |
 | `1` `2` `3` `4` | Commits · Status · Branches · Stashes |
 | `enter` | focus diff · checkout branch |
 | `c` / `y` / `R` / `v` | checkout · pick · rebase · revert commit |

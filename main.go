@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 func main() {
 	path := "."
@@ -100,7 +100,7 @@ usage:
 
 // printGraph dumps the rendered commit tree to stdout (no TUI).
 func printGraph(repo *Repo, limit int) {
-	commits, err := repo.Commits(limit)
+	commits, err := repo.Commits(limit, true)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "git2: "+err.Error())
 		os.Exit(1)

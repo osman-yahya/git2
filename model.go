@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +31,7 @@ const (
 	promptCommit
 	promptStash
 	promptOrigin
+	promptBranch
 )
 
 const (
@@ -44,6 +48,7 @@ type model struct {
 	focus int
 
 	// commits view
+	allRefs    bool // true = graph shows --all; false = current branch only
 	commits    []Commit
 	rows       []GraphRow
 	visible    []int // indices into commits (filtered by search)
@@ -59,13 +64,16 @@ type model struct {
 	searchInput textinput.Model
 	query       string
 
-	// status view
-	files      []FileStatus
-	fileSel    int
-	fileOffset int
-	fileDiff   []string
-	diffFor    string
-	diffOff    int
+	// status view: files + stashes flattened into selectable items,
+	// rendered as rows (tree headers interleaved)
+	files       []FileStatus
+	statusItems []statusItem
+	statusRows  []statusRow
+	fileSel     int // index into statusItems
+	fileOffset  int // scroll offset in row space
+	fileDiff    []string
+	diffFor     string
+	diffOff     int
 
 	// branches view
 	branches []Branch
@@ -96,11 +104,45 @@ type model struct {
 	choiceOptions []choiceOption
 	choiceSel     int
 
+	// pending base for the new-branch prompt ("" = HEAD)
+	branchBase string
+
+	// double-click detection
+	lastClickAt time.Time
+	lastClickY  int
+
 	fetching bool
 	head     HeadInfo
 	showHelp bool
 	flash    string
 	flashErr bool
+	flashAt  time.Time
+}
+
+type statusItem struct {
+	isStash bool
+	file    FileStatus
+	stash   Stash
+}
+
+// statusRow is one rendered line in the status list: a selectable item or a
+// section/directory header (item == -1).
+type statusRow struct {
+	item int
+	text string
+}
+
+func itemKey(it statusItem) string {
+	if it.isStash {
+		return "stash:" + it.stash.Ref
+	}
+	return fileKey(it.file)
+}
+
+func (m *model) setFlash(text string, isErr bool) {
+	m.flash = text
+	m.flashErr = isErr
+	m.flashAt = time.Now()
 }
 
 func newModel(repo *Repo) model {
@@ -114,6 +156,7 @@ func newModel(repo *Repo) model {
 
 	return model{
 		repo:        repo,
+		allRefs:     true,
 		searchInput: si,
 		promptInput: pi,
 	}
@@ -159,9 +202,10 @@ type branchLogMsg struct {
 }
 type headMsg HeadInfo
 type actionMsg struct {
-	text   string
-	err    error
-	reload bool
+	text        string
+	err         error
+	reload      bool
+	gotoCommits bool // jump to the graph after success (post-commit)
 }
 type stashesMsg struct {
 	stashes []Stash
@@ -177,6 +221,8 @@ type fetchDoneMsg struct {
 	manual bool
 }
 type autoFetchMsg struct{}
+type flashTickMsg struct{}
+type branchPopupMsg struct{ branches []Branch }
 
 type choiceOption struct {
 	label string
@@ -195,8 +241,9 @@ type checkoutBlockedMsg struct {
 
 func (m model) loadCommits() tea.Cmd {
 	r := m.repo
+	all := m.allRefs
 	return func() tea.Msg {
-		commits, err := r.Commits(commitLimit)
+		commits, err := r.Commits(commitLimit, all)
 		return commitsMsg{commits, err}
 	}
 }
@@ -292,6 +339,152 @@ func autoFetchTick() tea.Cmd {
 	return tea.Tick(autoFetchEvery, func(time.Time) tea.Msg { return autoFetchMsg{} })
 }
 
+func flashTick() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return flashTickMsg{} })
+}
+
+func (m model) openBranchPopup() tea.Cmd {
+	r := m.repo
+	return func() tea.Msg {
+		branches, err := r.Branches()
+		if err != nil {
+			return actionMsg{err: err}
+		}
+		return branchPopupMsg{branches}
+	}
+}
+
+func (m model) loadItemDiff(it statusItem) tea.Cmd {
+	r := m.repo
+	if it.isStash {
+		ref := it.stash.Ref
+		return func() tea.Msg {
+			lines, err := r.StashDiff(ref)
+			return fileDiffMsg{"stash:" + ref, lines, err}
+		}
+	}
+	return m.loadFileDiff(it.file)
+}
+
+// rebuildStatusRows flattens files (grouped: conflicts / staged / changes,
+// with directory headers) plus stashes into the selectable status list.
+func (m *model) rebuildStatusRows() {
+	m.statusItems = m.statusItems[:0]
+	m.statusRows = m.statusRows[:0]
+	header := func(t string) {
+		m.statusRows = append(m.statusRows, statusRow{item: -1, text: t})
+	}
+	addFiles := func(title string, files []FileStatus) {
+		if len(files) == 0 {
+			return
+		}
+		header(title)
+		sort.Slice(files, func(a, b int) bool {
+			return statusTarget(files[a].Path) < statusTarget(files[b].Path)
+		})
+		lastDir := "."
+		for _, f := range files {
+			dir := filepath.Dir(statusTarget(f.Path))
+			if dir != lastDir {
+				if dir != "." {
+					header("   ▾ " + dir + "/")
+				}
+				lastDir = dir
+			}
+			idx := len(m.statusItems)
+			m.statusItems = append(m.statusItems, statusItem{file: f})
+			m.statusRows = append(m.statusRows, statusRow{item: idx})
+		}
+	}
+	var conflicts, staged, unstaged []FileStatus
+	for _, f := range m.files {
+		switch {
+		case f.Conflict:
+			conflicts = append(conflicts, f)
+		case f.Staged:
+			staged = append(staged, f)
+		default:
+			unstaged = append(unstaged, f)
+		}
+	}
+	addFiles("✗ Conflicts — fix, then space to mark resolved", conflicts)
+	addFiles("● Staged", staged)
+	addFiles("○ Changes", unstaged)
+	if len(m.stashes) > 0 {
+		header(fmt.Sprintf("≡ Stashes (%d) — ⏎ apply · x drop", len(m.stashes)))
+		for _, st := range m.stashes {
+			idx := len(m.statusItems)
+			m.statusItems = append(m.statusItems, statusItem{isStash: true, stash: st})
+			m.statusRows = append(m.statusRows, statusRow{item: idx})
+		}
+	}
+	if m.fileSel >= len(m.statusItems) {
+		m.fileSel = max(len(m.statusItems)-1, 0)
+	}
+}
+
+// itemRow maps an item index to its row index for scrolling.
+func (m model) itemRow(i int) int {
+	for r, row := range m.statusRows {
+		if row.item == i {
+			return r
+		}
+	}
+	return 0
+}
+
+func (m model) moveItem(delta int) (tea.Model, tea.Cmd) {
+	if len(m.statusItems) == 0 {
+		return m, nil
+	}
+	m.fileSel = clamp(m.fileSel+delta, 0, len(m.statusItems)-1)
+	ensureVisible(m.itemRow(m.fileSel), &m.fileOffset, m.listHeight())
+	it := m.statusItems[m.fileSel]
+	if itemKey(it) != m.diffFor {
+		return m, m.loadItemDiff(it)
+	}
+	return m, nil
+}
+
+// toggleStage stages/unstages a file, or marks a conflict as resolved.
+func (m model) toggleStage(it statusItem) tea.Cmd {
+	if it.isStash {
+		return nil
+	}
+	f := it.file
+	r := m.repo
+	return func() tea.Msg {
+		var err error
+		var verb string
+		switch {
+		case f.Conflict:
+			err, verb = r.StageFile(f), "marked resolved:"
+		case f.Staged:
+			err, verb = r.UnstageFile(f), "unstaged"
+		default:
+			err, verb = r.StageFile(f), "staged"
+		}
+		if err != nil {
+			return actionMsg{err: err}
+		}
+		return actionMsg{text: "✓ " + verb + " " + f.Path, reload: true}
+	}
+}
+
+// checkoutSelectedCommit prefers a local branch pointing at the commit.
+func (m model) checkoutSelectedCommit() tea.Cmd {
+	c, ok := m.selectedCommit()
+	if !ok {
+		return nil
+	}
+	for _, ref := range c.Refs {
+		if ref.Kind == RefBranch || (ref.Kind == RefHead && ref.Name != "HEAD") {
+			return m.doCheckout(ref.Name, ref.Name, false)
+		}
+	}
+	return m.doCheckout(c.Hash, c.ShortHash(), true)
+}
+
 // doCheckout tries to switch to a branch or commit; when git refuses because
 // of local changes it opens the cancel/stash/discard popup instead of failing.
 func (m model) doCheckout(target, desc string, isCommit bool) tea.Cmd {
@@ -368,12 +561,13 @@ func fileKey(f FileStatus) string {
 
 func (m model) Init() tea.Cmd {
 	m.loadingLog = true
-	return tea.Batch(m.loadCommits(), m.loadHead(), autoFetchTick())
+	return tea.Batch(m.loadCommits(), m.loadHead(), autoFetchTick(), flashTick())
 }
 
 // ---- geometry helpers ----
 
-func (m model) bodyHeight() int { return max(m.height-3, 1) }
+// header (1) + tab bar with its underline (2) + footer (1)
+func (m model) bodyHeight() int { return max(m.height-4, 1) }
 
 // listHeight is the number of content rows inside a bordered pane.
 func (m model) listHeight() int { return max(m.bodyHeight()-2, 1) }
@@ -460,7 +654,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commitsMsg:
 		m.loadingLog = false
 		if msg.err != nil {
-			m.flash, m.flashErr = msg.err.Error(), true
+			m.setFlash(msg.err.Error(), true)
 			return m, nil
 		}
 		m.commits = msg.commits
@@ -473,7 +667,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case detailsMsg:
 		if msg.err != nil {
-			m.flash, m.flashErr = msg.err.Error(), true
+			m.setFlash(msg.err.Error(), true)
 			return m, nil
 		}
 		if c, ok := m.selectedCommit(); ok && c.Hash == msg.hash {
@@ -483,33 +677,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusListMsg:
 		if msg.err != nil {
-			m.flash, m.flashErr = msg.err.Error(), true
+			m.setFlash(msg.err.Error(), true)
 			return m, nil
 		}
 		m.files = msg.files
-		if m.fileSel >= len(m.files) {
-			m.fileSel = max(len(m.files)-1, 0)
-		}
-		ensureVisible(m.fileSel, &m.fileOffset, m.listHeight())
-		if len(m.files) > 0 {
-			return m, m.loadFileDiff(m.files[m.fileSel])
+		m.rebuildStatusRows()
+		ensureVisible(m.itemRow(m.fileSel), &m.fileOffset, m.listHeight())
+		if len(m.statusItems) > 0 {
+			return m, m.loadItemDiff(m.statusItems[m.fileSel])
 		}
 		m.fileDiff, m.diffFor = nil, ""
 		return m, nil
 
 	case fileDiffMsg:
 		if msg.err != nil {
-			m.flash, m.flashErr = msg.err.Error(), true
+			m.setFlash(msg.err.Error(), true)
 			return m, nil
 		}
-		if len(m.files) > 0 && m.fileSel < len(m.files) && fileKey(m.files[m.fileSel]) == msg.key {
+		if len(m.statusItems) > 0 && m.fileSel < len(m.statusItems) && itemKey(m.statusItems[m.fileSel]) == msg.key {
 			m.fileDiff, m.diffFor, m.diffOff = msg.lines, msg.key, 0
 		}
 		return m, nil
 
 	case branchesMsg:
 		if msg.err != nil {
-			m.flash, m.flashErr = msg.err.Error(), true
+			m.setFlash(msg.err.Error(), true)
 			return m, nil
 		}
 		m.branches = msg.branches
@@ -524,7 +716,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case branchLogMsg:
 		if msg.err != nil {
-			m.flash, m.flashErr = msg.err.Error(), true
+			m.setFlash(msg.err.Error(), true)
 			return m, nil
 		}
 		if len(m.branches) > 0 && m.brSel < len(m.branches) && m.branches[m.brSel].Name == msg.name {
@@ -538,23 +730,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case stashesMsg:
 		if msg.err != nil {
-			m.flash, m.flashErr = msg.err.Error(), true
+			m.setFlash(msg.err.Error(), true)
 			return m, nil
 		}
 		m.stashes = msg.stashes
+		m.rebuildStatusRows()
 		if m.stSel >= len(m.stashes) {
 			m.stSel = max(len(m.stashes)-1, 0)
 		}
 		ensureVisible(m.stSel, &m.stOff, m.listHeight())
-		if len(m.stashes) > 0 {
+		if m.view == viewStashes && len(m.stashes) > 0 {
 			return m, m.loadStashDiff(m.stashes[m.stSel].Ref)
 		}
-		m.stDiff, m.stDiffFor = nil, ""
+		if len(m.stashes) == 0 {
+			m.stDiff, m.stDiffFor = nil, ""
+		}
 		return m, nil
 
 	case stashDiffMsg:
 		if msg.err != nil {
-			m.flash, m.flashErr = msg.err.Error(), true
+			m.setFlash(msg.err.Error(), true)
 			return m, nil
 		}
 		if len(m.stashes) > 0 && m.stSel < len(m.stashes) && m.stashes[m.stSel].Ref == msg.ref {
@@ -566,12 +761,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fetching = false
 		if msg.err != nil {
 			if msg.manual {
-				m.flash, m.flashErr = msg.err.Error(), true
+				m.setFlash(msg.err.Error(), true)
 			}
 			return m, nil
 		}
 		if msg.manual {
-			m.flash, m.flashErr = "✓ fetched all remotes", false
+			m.setFlash("✓ fetched all remotes", false)
 		}
 		return m, m.refresh()
 
@@ -594,13 +789,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case actionMsg:
 		if msg.err != nil {
-			m.flash, m.flashErr = msg.err.Error(), true
+			m.setFlash(msg.err.Error(), true)
+			return m, m.loadHead()
 		} else {
-			m.flash, m.flashErr = msg.text, false
+			m.setFlash(msg.text, false)
+			if msg.gotoCommits {
+				m.view = viewCommits
+				m.focus = focusLeft
+			}
 		}
 		if msg.reload {
 			return m, m.refresh()
 		}
+		return m, nil
+
+	case flashTickMsg:
+		if m.flash != "" && !m.flashAt.IsZero() && time.Since(m.flashAt) > 4*time.Second {
+			m.flash = ""
+		}
+		return m, flashTick()
+
+	case branchPopupMsg:
+		var opts []choiceOption
+		for _, b := range msg.branches {
+			if b.Remote {
+				continue
+			}
+			if b.Current {
+				opts = append(opts, choiceOption{label: "✓ " + b.Name + "  (current)", cmd: nil})
+				continue
+			}
+			name := b.Name
+			opts = append(opts, choiceOption{label: "⎇ " + name, cmd: m.doCheckout(name, name, false)})
+		}
+		if len(opts) == 0 {
+			m.setFlash("no local branches", false)
+			return m, nil
+		}
+		m.choiceTitle = "Switch branch"
+		m.choiceOptions = opts
+		m.choiceSel = 0
 		return m, nil
 
 	case tea.MouseMsg:
@@ -618,7 +846,7 @@ func (m model) refresh() tea.Cmd {
 	case viewCommits:
 		cmds = append(cmds, m.loadCommits())
 	case viewStatus:
-		cmds = append(cmds, m.loadStatus())
+		cmds = append(cmds, m.loadStatus(), m.loadStashes())
 	case viewBranches:
 		cmds = append(cmds, m.loadBranches())
 	case viewStashes:
@@ -635,7 +863,7 @@ func (m model) switchView(v viewID) (tea.Model, tea.Cmd) {
 	case viewCommits:
 		return m, tea.Batch(m.loadCommits(), m.loadHead())
 	case viewStatus:
-		return m, tea.Batch(m.loadStatus(), m.loadHead())
+		return m, tea.Batch(m.loadStatus(), m.loadStashes(), m.loadHead())
 	case viewBranches:
 		return m, tea.Batch(m.loadBranches(), m.loadHead())
 	case viewStashes:
@@ -658,7 +886,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "esc", "q":
 			m.choiceTitle, m.choiceOptions = "", nil
-			m.flash, m.flashErr = "cancelled", false
+			m.setFlash("cancelled", false)
 			return m, nil
 		case "j", "s", "down", "tab":
 			m.choiceSel = (m.choiceSel + 1) % len(m.choiceOptions)
@@ -670,7 +898,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cmd := m.choiceOptions[m.choiceSel].cmd
 			m.choiceTitle, m.choiceOptions = "", nil
 			if cmd == nil {
-				m.flash, m.flashErr = "staying put", false
+				m.setFlash("staying put", false)
 			}
 			return m, cmd
 		}
@@ -678,7 +906,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cmd := m.choiceOptions[n-1].cmd
 			m.choiceTitle, m.choiceOptions = "", nil
 			if cmd == nil {
-				m.flash, m.flashErr = "staying put", false
+				m.setFlash("staying put", false)
 			}
 			return m, cmd
 		}
@@ -692,7 +920,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if key == "y" || key == "Y" || key == "enter" {
 			return m, cmd
 		}
-		m.flash, m.flashErr = "cancelled", false
+		m.setFlash("cancelled", false)
 		return m, nil
 	}
 
@@ -712,6 +940,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if mode == promptOrigin && value == "" {
 				return m, nil
 			}
+			if mode == promptBranch && value == "" {
+				return m, nil
+			}
 			m.promptMode = promptNone
 			m.promptInput.Blur()
 			r := m.repo
@@ -721,7 +952,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					if err := r.Commit(value); err != nil {
 						return actionMsg{err: err}
 					}
-					return actionMsg{text: "✓ committed: " + value, reload: true}
+					return actionMsg{text: "✓ committed: " + value, reload: true, gotoCommits: true}
 				}
 			case promptStash:
 				return m, func() tea.Msg {
@@ -736,6 +967,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						return actionMsg{err: err}
 					}
 					return actionMsg{text: "✓ added origin " + value + " — press f to fetch", reload: true}
+				}
+			case promptBranch:
+				base := m.branchBase
+				return m, func() tea.Msg {
+					if err := r.CreateBranch(value, base); err != nil {
+						return actionMsg{err: err}
+					}
+					from := ""
+					if base != "" {
+						from = " at " + base[:min(8, len(base))]
+					}
+					return actionMsg{text: "✓ created & switched to " + value + from, reload: true}
 				}
 			}
 			return m, nil
@@ -791,32 +1034,32 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.switchView(viewStashes)
 	case "f":
 		if !m.head.HasRemote {
-			m.flash, m.flashErr = "no remote configured — press o to add origin", true
+			m.setFlash("no remote configured — press o to add origin", true)
 			return m, nil
 		}
 		m.fetching = true
-		m.flash, m.flashErr = "⇣ fetching…", false
+		m.setFlash("⇣ fetching…", false)
 		return m, m.doFetch(true)
 	case "p":
 		if m.view == viewStashes {
 			break // handled below: pop
 		}
 		if !m.head.HasRemote {
-			m.flash, m.flashErr = "no remote configured — press o to add origin", true
+			m.setFlash("no remote configured — press o to add origin", true)
 			return m, nil
 		}
-		m.flash, m.flashErr = "⇣ pulling…", false
+		m.setFlash("⇣ pulling…", false)
 		return m, m.doPull()
 	case "P":
 		if !m.head.HasRemote {
-			m.flash, m.flashErr = "no remote configured — press o to add origin", true
+			m.setFlash("no remote configured — press o to add origin", true)
 			return m, nil
 		}
-		m.flash, m.flashErr = "⇡ pushing…", false
+		m.setFlash("⇡ pushing…", false)
 		return m, m.doPush(false)
 	case "F":
 		if !m.head.HasRemote {
-			m.flash, m.flashErr = "no remote configured — press o to add origin", true
+			m.setFlash("no remote configured — press o to add origin", true)
 			return m, nil
 		}
 		m.confirmMsg = "Force-push " + m.head.Branch + " (with lease)? y/N"
@@ -824,19 +1067,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "o":
 		if url := m.repo.RemoteURL("origin"); url != "" {
-			m.flash, m.flashErr = "origin → "+url, false
+			m.setFlash("origin → "+url, false)
 			return m, nil
 		}
 		return m, m.openPrompt(promptOrigin, "⇄ origin url: ", "git@github.com:user/repo.git or https://…")
-	case "tab", "left", "right", "h", "l", "a", "d":
+	case "tab":
+		return m.switchView((m.view + 1) % 4)
+	case "shift+tab":
+		return m.switchView((m.view + 3) % 4)
+	case "left", "right", "h", "l", "a", "d":
 		if key == "left" || key == "h" || key == "a" {
 			m.focus = focusLeft
-		} else if key == "right" || key == "l" || key == "d" {
-			m.focus = focusRight
-		} else if m.focus == focusLeft {
-			m.focus = focusRight
 		} else {
-			m.focus = focusLeft
+			m.focus = focusRight
 		}
 		return m, nil
 	}
@@ -1005,17 +1248,24 @@ func (m model) handleCommitsKey(key string) (tea.Model, tea.Cmd) {
 		m.focus = focusRight
 		return m, nil
 	case "c":
+		return m, m.checkoutSelectedCommit()
+	case "t":
+		m.allRefs = !m.allRefs
+		if m.allRefs {
+			m.setFlash("showing all branches", false)
+		} else {
+			m.setFlash("⎇ branch focus: "+m.head.Branch+" only — t to show all", false)
+		}
+		return m, m.loadCommits()
+	case "b":
+		return m, m.openBranchPopup()
+	case "n":
 		c, ok := m.selectedCommit()
 		if !ok {
 			return m, nil
 		}
-		// prefer a local branch pointing at this commit over a detached HEAD
-		for _, ref := range c.Refs {
-			if ref.Kind == RefBranch || (ref.Kind == RefHead && ref.Name != "HEAD") {
-				return m, m.doCheckout(ref.Name, ref.Name, false)
-			}
-		}
-		return m, m.doCheckout(c.Hash, c.ShortHash(), true)
+		m.branchBase = c.Hash
+		return m, m.openPrompt(promptBranch, "⎇ ", "new branch name (from "+c.ShortHash()+")")
 	case "m":
 		c, ok := m.selectedCommit()
 		if !ok {
@@ -1102,65 +1352,99 @@ func (m model) handleStatusKey(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	moveFile := func(delta int) (tea.Model, tea.Cmd) {
-		if len(m.files) == 0 {
-			return m, nil
-		}
-		m.fileSel = clamp(m.fileSel+delta, 0, len(m.files)-1)
-		ensureVisible(m.fileSel, &m.fileOffset, m.listHeight())
-		f := m.files[m.fileSel]
-		if fileKey(f) != m.diffFor {
-			return m, m.loadFileDiff(f)
-		}
-		return m, nil
-	}
 	switch key {
 	case "j", "s", "down":
-		return moveFile(1)
+		return m.moveItem(1)
 	case "k", "w", "up":
-		return moveFile(-1)
+		return m.moveItem(-1)
 	case "ctrl+d", "pgdown":
-		return moveFile(page / 2)
+		return m.moveItem(page / 2)
 	case "ctrl+u", "pgup":
-		return moveFile(-page / 2)
+		return m.moveItem(-page / 2)
 	case "g", "home":
-		return moveFile(-len(m.files))
+		return m.moveItem(-len(m.statusItems))
 	case "G", "end":
-		return moveFile(len(m.files))
+		return m.moveItem(len(m.statusItems))
 	case " ":
-		if len(m.files) == 0 {
+		if len(m.statusItems) == 0 {
 			return m, nil
 		}
-		f := m.files[m.fileSel]
-		r := m.repo
-		return m, func() tea.Msg {
-			var err error
-			var verb string
-			if f.Staged {
-				err, verb = r.UnstageFile(f), "unstaged"
-			} else {
-				err, verb = r.StageFile(f), "staged"
+		it := m.statusItems[m.fileSel]
+		if it.isStash {
+			m.setFlash("⏎ applies a stash · x drops it", false)
+			return m, nil
+		}
+		return m, m.toggleStage(it)
+	case "enter":
+		if len(m.statusItems) == 0 {
+			return m, nil
+		}
+		it := m.statusItems[m.fileSel]
+		if it.isStash {
+			ref := it.stash.Ref
+			r := m.repo
+			return m, func() tea.Msg {
+				if err := r.StashApply(ref); err != nil {
+					return actionMsg{err: err}
+				}
+				return actionMsg{text: "✓ applied " + ref, reload: true}
 			}
-			if err != nil {
+		}
+		m.focus = focusRight
+		return m, nil
+	case "x":
+		if len(m.statusItems) == 0 {
+			return m, nil
+		}
+		if it := m.statusItems[m.fileSel]; it.isStash {
+			st := it.stash
+			r := m.repo
+			m.confirmMsg = "Drop " + st.Ref + " (" + truncate(st.Desc, 40) + ")? y/N"
+			m.confirmCmd = func() tea.Msg {
+				if err := r.StashDrop(st.Ref); err != nil {
+					return actionMsg{err: err}
+				}
+				return actionMsg{text: "✓ dropped " + st.Ref, reload: true}
+			}
+		}
+		return m, nil
+	case "X":
+		if !m.head.Merging {
+			return m, nil
+		}
+		r := m.repo
+		m.confirmMsg = "Abort the merge and go back? y/N"
+		m.confirmCmd = func() tea.Msg {
+			if err := r.MergeAbort(); err != nil {
 				return actionMsg{err: err}
 			}
-			return actionMsg{text: "✓ " + verb + " " + f.Path, reload: true}
+			return actionMsg{text: "✓ merge aborted", reload: true}
 		}
+		return m, nil
 	case "c":
-		return m, m.openPrompt(promptCommit, "✎ ", "commit message")
+		cmd := m.openPrompt(promptCommit, "✎ ", "commit message")
+		if m.head.Merging {
+			if msg := m.repo.MergeMessage(); msg != "" {
+				m.promptInput.SetValue(msg)
+			}
+		}
+		return m, cmd
 	case "S":
-		if len(m.files) == 0 {
-			m.flash, m.flashErr = "nothing to stash", false
+		hasFile := false
+		for _, it := range m.statusItems {
+			if !it.isStash {
+				hasFile = true
+				break
+			}
+		}
+		if !hasFile {
+			m.setFlash("nothing to stash", false)
 			return m, nil
 		}
 		return m, m.openPrompt(promptStash, "≡ ", "stash message (optional)")
-	case "enter":
-		m.focus = focusRight
-		return m, nil
 	}
 	return m, nil
 }
-
 func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 	page := m.listHeight()
 	if m.focus == focusRight {
@@ -1214,17 +1498,20 @@ func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 		}
 		b := m.branches[m.brSel]
 		if b.Current {
-			m.flash, m.flashErr = "already on "+b.Name, false
+			m.setFlash("already on "+b.Name, false)
 			return m, nil
 		}
 		return m, m.doCheckout(b.Name, b.Name, false)
+	case "n":
+		m.branchBase = ""
+		return m, m.openPrompt(promptBranch, "⎇ ", "new branch name (from "+m.head.Branch+")")
 	case "O":
 		if len(m.branches) == 0 {
 			return m, nil
 		}
 		url := m.repo.RemoteURL("origin")
 		if url == "" {
-			m.flash, m.flashErr = "no origin remote — press o to add one", true
+			m.setFlash("no origin remote — press o to add one", true)
 			return m, nil
 		}
 		b := m.branches[m.brSel]
@@ -1236,10 +1523,10 @@ func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 		}
 		pr := prURL(url, branch)
 		if err := openBrowser(pr); err != nil {
-			m.flash, m.flashErr = "could not open browser: "+pr, true
+			m.setFlash("could not open browser: "+pr, true)
 			return m, nil
 		}
-		m.flash, m.flashErr = "✓ opened PR page for "+branch+" → "+pr, false
+		m.setFlash("✓ opened PR page for "+branch+" → "+pr, false)
 		return m, nil
 	case "m":
 		if len(m.branches) == 0 {
@@ -1247,7 +1534,7 @@ func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 		}
 		b := m.branches[m.brSel]
 		if b.Current {
-			m.flash, m.flashErr = "cannot merge a branch into itself", true
+			m.setFlash("cannot merge a branch into itself", true)
 			return m, nil
 		}
 		r := m.repo
@@ -1296,8 +1583,8 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// list rows: body starts at y=2, +1 for the pane border
-		row := msg.Y - 3
+		// list rows: body starts at y=3 (header + 2-line tab bar), +1 border
+		row := msg.Y - 4
 		if row < 0 || row >= m.listHeight() {
 			return m, nil
 		}
@@ -1305,39 +1592,82 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.focus = focusRight
 			return m, nil
 		}
+		double := time.Since(m.lastClickAt) < 450*time.Millisecond && m.lastClickY == msg.Y
+		m.lastClickAt = time.Now()
+		m.lastClickY = msg.Y
 		m.focus = focusLeft
 		switch m.view {
 		case viewCommits:
 			target := m.offset + row
-			if target < len(m.visible) {
-				return m.moveSel(target - m.sel)
+			if target >= len(m.visible) {
+				return m, nil
 			}
+			if double && target == m.sel {
+				return m, m.checkoutSelectedCommit()
+			}
+			return m.moveSel(target - m.sel)
 		case viewStatus:
-			target := m.fileOffset + row
-			if target < len(m.files) {
-				m.fileSel = target
-				f := m.files[m.fileSel]
-				if fileKey(f) != m.diffFor {
-					return m, m.loadFileDiff(f)
+			rowIdx := m.fileOffset + row
+			if rowIdx >= len(m.statusRows) || m.statusRows[rowIdx].item < 0 {
+				return m, nil
+			}
+			target := m.statusRows[rowIdx].item
+			if double && target == m.fileSel {
+				it := m.statusItems[target]
+				if it.isStash {
+					ref := it.stash.Ref
+					r := m.repo
+					return m, func() tea.Msg {
+						if err := r.StashApply(ref); err != nil {
+							return actionMsg{err: err}
+						}
+						return actionMsg{text: "✓ applied " + ref, reload: true}
+					}
 				}
+				return m, m.toggleStage(it)
+			}
+			m.fileSel = target
+			it := m.statusItems[target]
+			if itemKey(it) != m.diffFor {
+				return m, m.loadItemDiff(it)
 			}
 		case viewBranches:
 			target := m.brOffset + row
-			if target < len(m.branches) {
-				m.brSel = target
-				b := m.branches[m.brSel]
-				if b.Name != m.brLogFor {
-					return m, m.loadBranchLog(b.Name)
+			if target >= len(m.branches) {
+				return m, nil
+			}
+			if double && target == m.brSel {
+				b := m.branches[target]
+				if b.Current {
+					m.setFlash("already on "+b.Name, false)
+					return m, nil
 				}
+				return m, m.doCheckout(b.Name, b.Name, false)
+			}
+			m.brSel = target
+			b := m.branches[m.brSel]
+			if b.Name != m.brLogFor {
+				return m, m.loadBranchLog(b.Name)
 			}
 		case viewStashes:
 			target := m.stOff + row
-			if target < len(m.stashes) {
-				m.stSel = target
-				st := m.stashes[m.stSel]
-				if st.Ref != m.stDiffFor {
-					return m, m.loadStashDiff(st.Ref)
+			if target >= len(m.stashes) {
+				return m, nil
+			}
+			if double && target == m.stSel {
+				st := m.stashes[target]
+				r := m.repo
+				return m, func() tea.Msg {
+					if err := r.StashApply(st.Ref); err != nil {
+						return actionMsg{err: err}
+					}
+					return actionMsg{text: "✓ applied " + st.Ref, reload: true}
 				}
+			}
+			m.stSel = target
+			st := m.stashes[m.stSel]
+			if st.Ref != m.stDiffFor {
+				return m, m.loadStashDiff(st.Ref)
 			}
 		}
 		return m, nil
@@ -1352,15 +1682,7 @@ func (m model) scrollLeft(delta int) (tea.Model, tea.Cmd) {
 	case viewCommits:
 		return m.moveSel(delta)
 	case viewStatus:
-		if len(m.files) == 0 {
-			return m, nil
-		}
-		m.fileSel = clamp(m.fileSel+delta, 0, len(m.files)-1)
-		ensureVisible(m.fileSel, &m.fileOffset, m.listHeight())
-		f := m.files[m.fileSel]
-		if fileKey(f) != m.diffFor {
-			return m, m.loadFileDiff(f)
-		}
+		return m.moveItem(delta)
 	case viewBranches:
 		if len(m.branches) == 0 {
 			return m, nil

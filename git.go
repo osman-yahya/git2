@@ -104,9 +104,13 @@ func parseRefs(decoration string) []Ref {
 	return refs
 }
 
-func (r *Repo) Commits(limit int) ([]Commit, error) {
+func (r *Repo) Commits(limit int, allRefs bool) ([]Commit, error) {
 	format := "%H\x1f%P\x1f%an\x1f%at\x1f%D\x1f%s\x1e"
-	out, err := r.git("log", "--all", "--date-order", "-n", strconv.Itoa(limit), "--pretty=format:"+format)
+	args := []string{"log", "--date-order", "-n", strconv.Itoa(limit), "--pretty=format:" + format}
+	if allRefs {
+		args = append(args, "--all")
+	}
+	out, err := r.git(args...)
 	if err != nil {
 		if strings.Contains(err.Error(), "does not have any commits") ||
 			strings.Contains(err.Error(), "bad default revision") {
@@ -186,6 +190,7 @@ type HeadInfo struct {
 	Behind    int
 	Dirty     int
 	HasRemote bool
+	Merging   bool
 }
 
 func (r *Repo) Head() HeadInfo {
@@ -213,6 +218,15 @@ func (r *Repo) Head() HeadInfo {
 	if out, err := r.git("remote"); err == nil {
 		h.HasRemote = strings.TrimSpace(out) != ""
 	}
+	if out, err := r.git("rev-parse", "--git-path", "MERGE_HEAD"); err == nil {
+		p := strings.TrimSpace(out)
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(r.Root, p)
+		}
+		if _, err := os.Stat(p); err == nil {
+			h.Merging = true
+		}
+	}
 	return h
 }
 
@@ -221,20 +235,25 @@ type FileStatus struct {
 	Code      string // single git status letter: M A D R C U ?
 	Staged    bool
 	Untracked bool
+	Conflict  bool
 }
 
-// Status returns staged entries followed by unstaged/untracked entries.
+// Status returns conflicted entries, then staged, then unstaged/untracked.
 func (r *Repo) Status() ([]FileStatus, error) {
-	out, err := r.git("status", "--porcelain")
+	out, err := r.git("status", "--porcelain", "-uall")
 	if err != nil {
 		return nil, err
 	}
-	var staged, unstaged []FileStatus
+	var conflicts, staged, unstaged []FileStatus
 	for _, line := range strings.Split(out, "\n") {
 		if len(line) < 4 {
 			continue
 		}
 		x, y, path := line[0], line[1], line[3:]
+		if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
+			conflicts = append(conflicts, FileStatus{Path: path, Code: "!", Conflict: true})
+			continue
+		}
 		if x == '?' {
 			unstaged = append(unstaged, FileStatus{Path: path, Code: "?", Untracked: true})
 			continue
@@ -246,7 +265,7 @@ func (r *Repo) Status() ([]FileStatus, error) {
 			unstaged = append(unstaged, FileStatus{Path: path, Code: string(y)})
 		}
 	}
-	return append(staged, unstaged...), nil
+	return append(conflicts, append(staged, unstaged...)...), nil
 }
 
 // statusTarget strips the "old -> new" rename notation down to the new path.
@@ -255,6 +274,53 @@ func statusTarget(path string) string {
 		return path[i+4:]
 	}
 	return path
+}
+
+// cleanDiff strips git's plumbing header noise from a patch, keeping a
+// simple file header, hunk separators and the +/- lines.
+func cleanDiff(raw string) []string {
+	var lines []string
+	for _, l := range strings.Split(strings.TrimRight(raw, "\n"), "\n") {
+		l = strings.ReplaceAll(l, "\t", "    ")
+		switch {
+		case strings.HasPrefix(l, "diff --git "):
+			// "diff --git a/x b/y" → file header on y
+			if i := strings.LastIndex(l, " b/"); i >= 0 {
+				if len(lines) > 0 {
+					lines = append(lines, "")
+				}
+				lines = append(lines, "▸ "+l[i+3:])
+			}
+		case strings.HasPrefix(l, "index "), strings.HasPrefix(l, "--- "),
+			strings.HasPrefix(l, "+++ "), strings.HasPrefix(l, "new file mode"),
+			strings.HasPrefix(l, "deleted file mode"), strings.HasPrefix(l, "old mode"),
+			strings.HasPrefix(l, "new mode"), strings.HasPrefix(l, "similarity index"),
+			strings.HasPrefix(l, "rename from"), strings.HasPrefix(l, "rename to"):
+			// plumbing noise — drop
+		case strings.HasPrefix(l, "@@"):
+			// "@@ -1,4 +1,5 @@ ctx" → "@@ +1  ctx"
+			rest := strings.TrimPrefix(l, "@@")
+			ctx := ""
+			if i := strings.Index(rest, "@@"); i >= 0 {
+				ctx = strings.TrimSpace(rest[i+2:])
+				rest = rest[:i]
+			}
+			target := ""
+			for _, fld := range strings.Fields(rest) {
+				if strings.HasPrefix(fld, "+") {
+					target = strings.SplitN(fld[1:], ",", 2)[0]
+				}
+			}
+			sep := "@@ line " + target
+			if ctx != "" {
+				sep += "  · " + ctx
+			}
+			lines = append(lines, sep)
+		default:
+			lines = append(lines, l)
+		}
+	}
+	return lines
 }
 
 func (r *Repo) FileDiff(f FileStatus) ([]string, error) {
@@ -281,11 +347,7 @@ func (r *Repo) FileDiff(f FileStatus) ([]string, error) {
 	if strings.TrimSpace(out) == "" {
 		return []string{"(no changes)"}, nil
 	}
-	var lines []string
-	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
-		lines = append(lines, strings.ReplaceAll(l, "\t", "    "))
-	}
-	return lines, nil
+	return cleanDiff(out), nil
 }
 
 func (r *Repo) StageFile(f FileStatus) error {
@@ -514,11 +576,7 @@ func (r *Repo) StashDiff(ref string) ([]string, error) {
 			return nil, err
 		}
 	}
-	var lines []string
-	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
-		lines = append(lines, strings.ReplaceAll(l, "\t", "    "))
-	}
-	return lines, nil
+	return cleanDiff(out), nil
 }
 
 // ---- merge ----
@@ -634,4 +692,59 @@ func openBrowser(url string) error {
 		cmd = exec.Command("xdg-open", url)
 	}
 	return cmd.Start()
+}
+
+// ---- branches & merge state ----
+
+// CreateBranch creates and switches to a new branch; base "" means HEAD.
+func (r *Repo) CreateBranch(name, base string) error {
+	args := []string{"checkout", "-b", name}
+	if base != "" {
+		args = append(args, base)
+	}
+	_, err := r.git(args...)
+	return err
+}
+
+func (r *Repo) MergeAbort() error {
+	_, err := r.git("merge", "--abort")
+	return err
+}
+
+// MergeMessage returns the prepared merge commit message (first line).
+func (r *Repo) MergeMessage() string {
+	out, err := r.git("rev-parse", "--git-path", "MERGE_MSG")
+	if err != nil {
+		return ""
+	}
+	p := strings.TrimSpace(out)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(r.Root, p)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	if i := strings.IndexByte(string(data), '\n'); i > 0 {
+		return string(data[:i])
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// stashMeta splits a stash description like "WIP on main: 1a2b3c msg" or
+// "On feature/x: msg" into the branch and the message part.
+func stashMeta(desc string) (branch, msg string) {
+	s := desc
+	switch {
+	case strings.HasPrefix(s, "WIP on "):
+		s = strings.TrimPrefix(s, "WIP on ")
+	case strings.HasPrefix(s, "On "):
+		s = strings.TrimPrefix(s, "On ")
+	default:
+		return "", desc
+	}
+	if i := strings.Index(s, ": "); i >= 0 {
+		return s[:i], s[i+2:]
+	}
+	return "", desc
 }

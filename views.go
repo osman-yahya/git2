@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -46,7 +47,7 @@ func (m model) View() string {
 // ---- chrome ----
 
 func (m model) renderHeader() string {
-	left := sHeaderRepo.Render("● git2 ") + sHeaderInfo.Render("· "+m.repo.Root)
+	repoPath := collapseHome(m.repo.Root)
 
 	var parts []string
 	branch := m.head.Branch
@@ -69,6 +70,9 @@ func (m model) renderHeader() string {
 	} else {
 		parts = append(parts, "✓ clean")
 	}
+	if m.head.Merging {
+		parts = append(parts, "⚠ MERGING")
+	}
 	if m.fetching {
 		parts = append(parts, "⇣ fetching…")
 	} else if !m.head.HasRemote {
@@ -76,12 +80,17 @@ func (m model) renderHeader() string {
 	}
 	right := sHeaderInfo.Render(strings.Join(parts, "  "))
 
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+	// the right side (branch, merge state, sync info) always wins over the path;
+	// inner budget is width-2 because sHeader pads one column each side
+	inner := m.width - 2
+	maxPath := inner - lipgloss.Width(right) - 12
+	left := sHeaderRepo.Render("● git2 ") + sHeaderInfo.Render("· "+truncate(repoPath, max(maxPath, 8)))
+	gap := inner - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
 	}
-	bar := left + sHeader.Render(strings.Repeat(" ", gap)) + right
-	return sHeader.Width(m.width).MaxHeight(1).Render(bar)
+	pad := lipgloss.NewStyle().Background(cBarBg).Render(strings.Repeat(" ", gap))
+	return sHeader.Width(m.width).MaxHeight(1).Render(left + pad + right)
 }
 
 func (m model) renderTabs() string {
@@ -108,15 +117,15 @@ func (m model) renderTabs() string {
 
 func (m model) renderFooter() string {
 	if m.confirmMsg != "" {
-		return sFooter.Width(m.width).Render(sStatusM.Background(cBarBg).
+		return sFooter.Width(m.width).MaxHeight(1).Render(sStatusM.Background(cBarBg).
 			Render("⚠ " + m.confirmMsg))
 	}
 	if m.searching {
-		return sFooter.Width(m.width).Render(m.searchInput.View() + "  " +
+		return sFooter.Width(m.width).MaxHeight(1).Render(m.searchInput.View() + "  " +
 			sDim.Render("enter apply · esc clear"))
 	}
 	if m.promptMode != promptNone {
-		return sFooter.Width(m.width).Render(m.promptInput.View() + "  " +
+		return sFooter.Width(m.width).MaxHeight(1).Render(m.promptInput.View() + "  " +
 			sDim.Render("enter confirm · esc cancel"))
 	}
 	if m.flash != "" {
@@ -124,7 +133,7 @@ func (m model) renderFooter() string {
 		if m.flashErr {
 			style = sErr
 		}
-		return sFooter.Width(m.width).Render(style.
+		return sFooter.Width(m.width).MaxHeight(1).Render(style.
 			Background(cBarBg).Render(truncate(m.flash, m.width-4)))
 	}
 
@@ -132,21 +141,25 @@ func (m model) renderFooter() string {
 	var hints []hint
 	switch m.view {
 	case viewCommits:
-		hints = []hint{{"↑↓", "navigate"}, {"⏎", "diff"}, {"c", "checkout"}, {"y", "pick"}, {"m", "merge"}, {"R", "rebase"}, {"/", "search"}}
+		hints = []hint{{"c", "checkout"}, {"b", "branch"}, {"t", "focus"}, {"n", "new"}, {"m·y·R·v", "merge·pick…"}, {"/", "search"}}
 	case viewStatus:
-		hints = []hint{{"↑↓", "navigate"}, {"space", "stage"}, {"c", "commit"}, {"S", "stash"}}
+		if m.head.Merging {
+			hints = []hint{{"space", "resolve"}, {"c", "commit merge"}, {"X", "abort merge"}}
+		} else {
+			hints = []hint{{"space", "stage"}, {"c", "commit"}, {"S", "stash"}, {"⏎", "diff·apply"}}
+		}
 	case viewBranches:
-		hints = []hint{{"↑↓", "navigate"}, {"⏎", "checkout"}, {"m", "merge"}, {"O", "PR"}, {"p", "pull"}, {"P", "push"}}
+		hints = []hint{{"⏎", "checkout"}, {"n", "new"}, {"m", "merge"}, {"O", "PR"}, {"p", "pull"}, {"P", "push"}}
 	case viewStashes:
-		hints = []hint{{"↑↓", "navigate"}, {"⏎", "apply"}, {"p", "pop"}, {"x", "drop"}}
+		hints = []hint{{"⏎", "apply"}, {"p", "pop"}, {"x", "drop"}}
 	}
-	hints = append(hints, hint{"1-4", "views"}, hint{"?", "help"}, hint{"q", "quit"})
+	hints = append(hints, hint{"tab", "next view"}, hint{"?", "help"}, hint{"q", "quit"})
 
 	var parts []string
 	for _, h := range hints {
 		parts = append(parts, sFooterKey.Render(h.key)+sFooter.UnsetPadding().Render(" "+h.label))
 	}
-	return sFooter.Width(m.width).Render(strings.Join(parts, sFooter.UnsetPadding().Render("  ·  ")))
+	return sFooter.Width(m.width).MaxHeight(1).Render(strings.Join(parts, sFooter.UnsetPadding().Render(" · ")))
 }
 
 // ---- panes ----
@@ -187,6 +200,9 @@ func (m model) pane(title, content string, width int, focused bool) string {
 func (m model) renderCommitsView() string {
 	lw, rw := m.leftWidth(), m.rightWidth()
 	title := fmt.Sprintf("Commits · %d", len(m.visible))
+	if !m.allRefs {
+		title = fmt.Sprintf("Commits · ⎇ %s · %d", m.head.Branch, len(m.visible))
+	}
 	if m.query != "" {
 		title = fmt.Sprintf("Commits · %d/%d · “%s”", len(m.visible), len(m.commits), m.query)
 	}
@@ -355,80 +371,123 @@ func shortRemote(name string) string {
 func (m model) renderStatusView() string {
 	lw, rw := m.leftWidth(), m.rightWidth()
 
-	staged := 0
+	conflicts, staged, unstaged := 0, 0, 0
 	for _, f := range m.files {
-		if f.Staged {
+		switch {
+		case f.Conflict:
+			conflicts++
+		case f.Staged:
 			staged++
+		default:
+			unstaged++
 		}
 	}
-	title := fmt.Sprintf("Working tree · %d staged · %d unstaged", staged, len(m.files)-staged)
-	left := m.pane(title, m.renderFileList(lw-2), lw, m.focus == focusLeft)
+	title := fmt.Sprintf("Working tree · %d staged · %d changed", staged, unstaged)
+	if conflicts > 0 {
+		title = fmt.Sprintf("Working tree · %d conflicts · %d staged · %d changed", conflicts, staged, unstaged)
+	}
+	if m.head.Merging {
+		title += " · MERGING"
+	}
+	left := m.pane(title, m.renderStatusList(lw-2), lw, m.focus == focusLeft)
 
 	diffTitle := "Diff"
-	if len(m.files) > 0 && m.fileSel < len(m.files) {
-		diffTitle = "Diff · " + truncate(m.files[m.fileSel].Path, rw-12)
+	if len(m.statusItems) > 0 && m.fileSel < len(m.statusItems) {
+		it := m.statusItems[m.fileSel]
+		if it.isStash {
+			diffTitle = "Diff · " + it.stash.Ref
+		} else {
+			diffTitle = "Diff · " + truncate(it.file.Path, rw-12)
+		}
 	}
 	right := m.pane(diffTitle, m.renderDiffLines(m.fileDiff, m.diffOff, rw-2), rw, m.focus == focusRight)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
-func (m model) renderFileList(width int) string {
-	if len(m.files) == 0 {
+// stashLabel renders a stash description as a branch chip + clean message.
+func stashLabel(st Stash, selected bool, width int) string {
+	branch, msg := stashMeta(st.Desc)
+	bg := lipgloss.NewStyle()
+	if selected {
+		bg = bg.Background(cSelBg)
+	}
+	refStyle := lipgloss.NewStyle().Foreground(cMagenta).Bold(true)
+	msgStyle := sText
+	if selected {
+		refStyle = refStyle.Background(cSelBg)
+		msgStyle = sBright.Background(cSelBg)
+	}
+	out := refStyle.Render(st.Ref)
+	used := len([]rune(st.Ref))
+	if branch != "" {
+		chip := sRefBranch.Render("⎇ " + branch)
+		out += bg.Render(" ") + chip
+		used += 1 + lipgloss.Width(chip)
+	}
+	out += bg.Render(" ") + msgStyle.Render(truncate(msg, max(width-used-1, 4)))
+	return out
+}
+
+func (m model) renderStatusList(width int) string {
+	if len(m.statusRows) == 0 {
 		return sOk.Render("  ✓ working tree clean") + "\n\n" +
 			sDim.Render("  nothing to stage or commit")
 	}
 	h := m.listHeight()
 	var b strings.Builder
-	lastStaged := true
-	first := true
 	rendered := 0
-	for i := m.fileOffset; i < len(m.files) && rendered < h; i++ {
-		f := m.files[i]
-		if first || f.Staged != lastStaged {
-			if !first {
-				// blank separator only if it fits
+	for i := m.fileOffset; i < len(m.statusRows) && rendered < h; i++ {
+		row := m.statusRows[i]
+		if row.item < 0 {
+			// section or directory header
+			style := sPaneTitle
+			if strings.HasPrefix(row.text, "   ▾") {
+				style = sDim
 			}
+			if strings.HasPrefix(row.text, "✗") {
+				style = sErr
+			}
+			b.WriteString(style.Render(truncate(row.text, width)))
+		} else {
+			it := m.statusItems[row.item]
+			selected := row.item == m.fileSel
+			bg := lipgloss.NewStyle()
+			if selected {
+				bg = bg.Background(cSelBg)
+			}
+			var line string
+			if it.isStash {
+				line = bg.Render("  ") + stashLabel(it.stash, selected, width-2)
+			} else {
+				f := it.file
+				target := statusTarget(f.Path)
+				name := filepath.Base(target)
+				indent := "  "
+				if filepath.Dir(target) != "." {
+					indent = "    "
+				}
+				codeStyle := statusCodeStyle(f.Code)
+				if f.Conflict {
+					codeStyle = sErr
+				}
+				nameStyle := sText
+				if selected {
+					codeStyle = codeStyle.Background(cSelBg)
+					nameStyle = sBright.Background(cSelBg)
+				}
+				line = bg.Render(indent) + codeStyle.Render(f.Code) + bg.Render(" ") +
+					nameStyle.Render(truncate(name, width-len(indent)-3))
+			}
+			pad := width - lipgloss.Width(line)
+			if pad > 0 {
+				line += bg.Render(strings.Repeat(" ", pad))
+			}
+			b.WriteString(line)
 		}
-		first = false
-		lastStaged = f.Staged
-
-		selected := i == m.fileSel
-		bg := lipgloss.NewStyle()
-		if selected {
-			bg = bg.Background(cSelBg)
-		}
-		section := "○"
-		secStyle := sDim
-		if f.Staged {
-			section = "●"
-			secStyle = sOk
-		}
-		if selected {
-			secStyle = secStyle.Background(cSelBg)
-		}
-		codeStyle := statusCodeStyle(f.Code)
-		if selected {
-			codeStyle = codeStyle.Background(cSelBg)
-		}
-		nameStyle := sText
-		if selected {
-			nameStyle = sBright.Background(cSelBg)
-		}
-		path := truncate(f.Path, width-8)
-		line := bg.Render(" ") + secStyle.Render(section) + bg.Render(" ") +
-			codeStyle.Render(f.Code) + bg.Render(" ") + nameStyle.Render(path)
-		pad := width - lipgloss.Width(line)
-		if pad > 0 {
-			line += bg.Render(strings.Repeat(" ", pad))
-		}
-		b.WriteString(line)
 		rendered++
 		if rendered < h {
 			b.WriteString("\n")
 		}
-	}
-	if rendered < h {
-		b.WriteString("\n" + sDim.Render("  ● staged   ○ unstaged   space to toggle"))
 	}
 	return b.String()
 }
@@ -576,18 +635,12 @@ func (m model) renderStashList(width int) string {
 		if selected {
 			bg = bg.Background(cSelBg)
 		}
-		refStyle := lipgloss.NewStyle().Foreground(cMagenta).Bold(true)
-		descStyle := sText
 		ageStyle := sDim
 		if selected {
-			refStyle = refStyle.Background(cSelBg)
-			descStyle = sBright.Background(cSelBg)
 			ageStyle = ageStyle.Background(cSelBg)
 		}
 		age := st.Age
-		descW := width - len([]rune(st.Ref)) - len([]rune(age)) - 5
-		desc := truncate(st.Desc, max(descW, 8))
-		line := bg.Render(" ") + refStyle.Render(st.Ref) + bg.Render(" ") + descStyle.Render(desc)
+		line := bg.Render(" ") + stashLabel(st, selected, width-len([]rune(age))-3)
 		gap := width - lipgloss.Width(line) - len([]rune(age)) - 1
 		if gap > 0 {
 			line += bg.Render(strings.Repeat(" ", gap))
@@ -630,7 +683,8 @@ func (m model) renderDiffLines(lines []string, offset, width int) string {
 func styleDiffLine(line string, width int) string {
 	t := truncate(line, width)
 	switch {
-	case strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "commit "):
+	case strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "commit "),
+		strings.HasPrefix(line, "▸ "):
 		return sDiffHeader.Render(t)
 	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
 		return sDiffMeta.Render(t)
@@ -677,15 +731,20 @@ func (m model) renderChoice() string {
 
 func (m model) renderHelp() string {
 	rows := [][2]string{
-		{"1 / 2 / 3 / 4", "commits · status · branches · stashes"},
-		{"tab / ← → / a d", "switch pane focus"},
+		{"1 2 3 4 / tab", "switch view (tab cycles, shift+tab back)"},
+		{"← → / a d / h l", "switch pane focus"},
 		{"↑ ↓ / w s / j k", "move selection / scroll"},
 		{"ctrl+d ctrl+u", "half-page down / up"},
 		{"g / G", "jump to top / bottom"},
 		{"enter", "focus diff · checkout branch · apply stash"},
 		{"/", "search commits"},
 		{"c", "checkout commit (commits) · commit staged (status)"},
+		{"t", "toggle branch focus / all branches (commits view)"},
+		{"b", "switch branch popup (commits view)"},
+		{"n", "new branch — from commit (commits) or HEAD (branches)"},
 		{"y / R / v", "cherry-pick · rebase onto · revert (commits view)"},
+		{"X", "abort merge (status view, during a merge)"},
+		{"dbl-click", "checkout · stage/unstage · apply stash"},
 		{"space", "stage / unstage file"},
 		{"S", "stash working tree (status view)"},
 		{"m", "merge selected commit / branch into current"},
