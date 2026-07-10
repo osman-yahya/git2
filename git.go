@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -339,29 +340,14 @@ func (r *Repo) Branches() ([]Branch, error) {
 			Date:    parts[5],
 			Subject: parts[6],
 		}
-		if b.Remote && strings.HasSuffix(b.Name, "/HEAD") {
+		// skip the symbolic origin/HEAD ref (its short name is just "origin",
+		// and checking it out would detach HEAD)
+		if strings.HasSuffix(parts[1], "/HEAD") {
 			continue
 		}
 		branches = append(branches, b)
 	}
 	return branches, nil
-}
-
-func (r *Repo) Checkout(name string) error {
-	// checking out a remote branch creates a local tracking branch
-	local := name
-	if i := strings.Index(name, "/"); i >= 0 {
-		local = name[i+1:]
-	}
-	if local != name {
-		if _, err := r.git("checkout", local); err == nil {
-			return nil
-		}
-		_, err := r.git("checkout", "-b", local, "--track", name)
-		return err
-	}
-	_, err := r.git("checkout", name)
-	return err
 }
 
 func (r *Repo) BranchLog(name string, limit int) ([]string, error) {
@@ -540,4 +526,112 @@ func (r *Repo) StashDiff(ref string) ([]string, error) {
 func (r *Repo) Merge(name string) error {
 	_, err := r.git("merge", "--no-edit", name)
 	return err
+}
+
+// ---- commit-level operations ----
+
+// isBlockedCheckout reports whether an error is git refusing to switch
+// because local changes would be overwritten.
+func isBlockedCheckout(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "would be overwritten") ||
+		strings.Contains(s, "commit your changes or stash them")
+}
+
+// CheckoutBranch switches branches and returns a description of what
+// actually happened. Remote branches ("origin/foo") are never checked out
+// directly: git2 switches to (or creates) the local tracking branch and the
+// message says so explicitly.
+func (r *Repo) CheckoutBranch(name string) (string, error) {
+	if i := strings.Index(name, "/"); i >= 0 {
+		local := name[i+1:]
+		if _, err := r.git("show-ref", "--verify", "--quiet", "refs/heads/"+local); err == nil {
+			if _, err := r.git("checkout", local); err != nil {
+				return "", err
+			}
+			return "✓ switched to local " + local + " (tracking " + name + " — pull to sync)", nil
+		}
+		if _, err := r.git("checkout", "-b", local, "--track", name); err != nil {
+			return "", err
+		}
+		return "✓ created " + local + " tracking " + name, nil
+	}
+	if _, err := r.git("checkout", name); err != nil {
+		return "", err
+	}
+	return "✓ checked out " + name, nil
+}
+
+// CheckoutCommit moves HEAD to a commit (detached).
+func (r *Repo) CheckoutCommit(hash string) (string, error) {
+	if _, err := r.git("checkout", hash); err != nil {
+		return "", err
+	}
+	return "✓ checked out " + hash[:8] + " (detached HEAD — use Branches to return)", nil
+}
+
+// DiscardAll throws away tracked working-tree changes.
+func (r *Repo) DiscardAll() error {
+	_, err := r.git("reset", "--hard")
+	return err
+}
+
+func (r *Repo) CherryPick(hash string) error {
+	_, err := r.git("cherry-pick", hash)
+	return err
+}
+
+func (r *Repo) Rebase(onto string) error {
+	_, err := r.git("rebase", onto)
+	return err
+}
+
+func (r *Repo) Revert(hash string) error {
+	_, err := r.git("revert", "--no-edit", hash)
+	return err
+}
+
+// ---- pull-request URLs ----
+
+// PRURL builds the "open a pull request" page for a branch on the origin
+// host. Understands github / gitlab / bitbucket; anything else gets the
+// repo page.
+func prURL(remoteURL, branch string) string {
+	u := strings.TrimSuffix(strings.TrimSpace(remoteURL), ".git")
+	u = strings.TrimPrefix(u, "ssh://")
+	if strings.HasPrefix(u, "git@") {
+		u = strings.Replace(strings.TrimPrefix(u, "git@"), ":", "/", 1)
+	}
+	u = strings.TrimPrefix(u, "https://")
+	u = strings.TrimPrefix(u, "http://")
+	host := u
+	if i := strings.Index(u, "/"); i >= 0 {
+		host = u[:i]
+	}
+	switch {
+	case strings.Contains(host, "github"):
+		return "https://" + u + "/compare/" + branch + "?expand=1"
+	case strings.Contains(host, "gitlab"):
+		return "https://" + u + "/-/merge_requests/new?merge_request%5Bsource_branch%5D=" + branch
+	case strings.Contains(host, "bitbucket"):
+		return "https://" + u + "/pull-requests/new?source=" + branch
+	default:
+		return "https://" + u
+	}
+}
+
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start()
 }

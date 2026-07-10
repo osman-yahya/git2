@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	path := "."
@@ -27,6 +27,12 @@ func main() {
 			return
 		case "-p", "--print":
 			printMode = true
+		case "update", "--update":
+			if err := selfUpdate(); err != nil {
+				fmt.Fprintln(os.Stderr, "git2: "+err.Error())
+				os.Exit(1)
+			}
+			return
 		default:
 			if !strings.HasPrefix(a, "-") {
 				path = a
@@ -88,6 +94,7 @@ usage:
                      outside a repo, a picker offers recent repos and a
                      directory browser
   git2 -p, --print   print the commit graph and exit
+  git2 update        replace this binary with the latest release
   git2 -v, --version print version`)
 }
 

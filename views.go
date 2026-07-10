@@ -34,6 +34,9 @@ func (m model) View() string {
 	if m.showHelp {
 		body = m.overlay(body, m.renderHelp())
 	}
+	if len(m.choiceOptions) > 0 {
+		body = m.overlay(body, m.renderChoice())
+	}
 	b.WriteString(body)
 	b.WriteString("\n")
 	b.WriteString(m.renderFooter())
@@ -129,11 +132,11 @@ func (m model) renderFooter() string {
 	var hints []hint
 	switch m.view {
 	case viewCommits:
-		hints = []hint{{"↑↓", "navigate"}, {"⏎", "diff"}, {"/", "search"}, {"f", "fetch"}, {"P", "push"}}
+		hints = []hint{{"↑↓", "navigate"}, {"⏎", "diff"}, {"c", "checkout"}, {"y", "pick"}, {"m", "merge"}, {"R", "rebase"}, {"/", "search"}}
 	case viewStatus:
 		hints = []hint{{"↑↓", "navigate"}, {"space", "stage"}, {"c", "commit"}, {"S", "stash"}}
 	case viewBranches:
-		hints = []hint{{"↑↓", "navigate"}, {"⏎", "checkout"}, {"m", "merge"}, {"p", "pull"}, {"P", "push"}}
+		hints = []hint{{"↑↓", "navigate"}, {"⏎", "checkout"}, {"m", "merge"}, {"O", "PR"}, {"p", "pull"}, {"P", "push"}}
 	case viewStashes:
 		hints = []hint{{"↑↓", "navigate"}, {"⏎", "apply"}, {"p", "pop"}, {"x", "drop"}}
 	}
@@ -653,6 +656,23 @@ func styleDiffLine(line string, width int) string {
 	}
 }
 
+// ---- choice popup ----
+
+func (m model) renderChoice() string {
+	var b strings.Builder
+	b.WriteString(sBright.Render(m.choiceTitle) + "\n\n")
+	for i, opt := range m.choiceOptions {
+		marker, style := "  ", sText
+		if i == m.choiceSel {
+			marker, style = "▸ ", sBright.Background(cSelBg)
+		}
+		b.WriteString(fmt.Sprintf("%s%s %s\n", marker,
+			sHelpKey.Render(fmt.Sprintf("%d", i+1)), style.Render(opt.label)))
+	}
+	b.WriteString("\n" + sDim.Render("↑↓ choose · ⏎ confirm · esc cancel"))
+	return sHelpBox.Render(strings.TrimRight(b.String(), "\n"))
+}
+
 // ---- help overlay ----
 
 func (m model) renderHelp() string {
@@ -662,12 +682,14 @@ func (m model) renderHelp() string {
 		{"↑ ↓ / w s / j k", "move selection / scroll"},
 		{"ctrl+d ctrl+u", "half-page down / up"},
 		{"g / G", "jump to top / bottom"},
-		{"enter", "focus diff · checkout · apply stash"},
+		{"enter", "focus diff · checkout branch · apply stash"},
 		{"/", "search commits"},
+		{"c", "checkout commit (commits) · commit staged (status)"},
+		{"y / R / v", "cherry-pick · rebase onto · revert (commits view)"},
 		{"space", "stage / unstage file"},
-		{"c", "commit staged changes"},
 		{"S", "stash working tree (status view)"},
-		{"m", "merge branch into current (branches view)"},
+		{"m", "merge selected commit / branch into current"},
+		{"O", "open pull-request page in browser (branches view)"},
 		{"f", "fetch all remotes (auto every 3 min)"},
 		{"p", "pull (fast-forward) · pop stash"},
 		{"P / F", "push · force-push with lease"},

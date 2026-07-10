@@ -91,6 +91,11 @@ type model struct {
 	confirmMsg string
 	confirmCmd tea.Cmd
 
+	// choice popup (e.g. blocked checkout: cancel / stash / discard)
+	choiceTitle   string
+	choiceOptions []choiceOption
+	choiceSel     int
+
 	fetching bool
 	head     HeadInfo
 	showHelp bool
@@ -172,6 +177,19 @@ type fetchDoneMsg struct {
 	manual bool
 }
 type autoFetchMsg struct{}
+
+type choiceOption struct {
+	label string
+	cmd   tea.Cmd
+}
+
+// checkoutBlockedMsg opens the popup when git refuses to switch because of
+// local changes. target is what we tried to check out.
+type checkoutBlockedMsg struct {
+	target   string
+	desc     string // human name shown in the popup
+	isCommit bool
+}
 
 // ---- commands ----
 
@@ -272,6 +290,72 @@ func (m model) doPush(force bool) tea.Cmd {
 
 func autoFetchTick() tea.Cmd {
 	return tea.Tick(autoFetchEvery, func(time.Time) tea.Msg { return autoFetchMsg{} })
+}
+
+// doCheckout tries to switch to a branch or commit; when git refuses because
+// of local changes it opens the cancel/stash/discard popup instead of failing.
+func (m model) doCheckout(target, desc string, isCommit bool) tea.Cmd {
+	r := m.repo
+	return func() tea.Msg {
+		var text string
+		var err error
+		if isCommit {
+			text, err = r.CheckoutCommit(target)
+		} else {
+			text, err = r.CheckoutBranch(target)
+		}
+		if isBlockedCheckout(err) {
+			return checkoutBlockedMsg{target: target, desc: desc, isCommit: isCommit}
+		}
+		if err != nil {
+			return actionMsg{err: err}
+		}
+		return actionMsg{text: text, reload: true}
+	}
+}
+
+func (m model) stashSwitchReapply(target string, isCommit bool) tea.Cmd {
+	r := m.repo
+	return func() tea.Msg {
+		if err := r.StashPush("git2: auto-stash before switching"); err != nil {
+			return actionMsg{err: err}
+		}
+		var text string
+		var err error
+		if isCommit {
+			text, err = r.CheckoutCommit(target)
+		} else {
+			text, err = r.CheckoutBranch(target)
+		}
+		if err != nil {
+			_ = r.StashPop("stash@{0}") // roll the stash back where we started
+			return actionMsg{err: err}
+		}
+		if err := r.StashPop("stash@{0}"); err != nil {
+			return actionMsg{text: text + " · stash re-apply conflicted — resolve in Status view (stash kept)", reload: true}
+		}
+		return actionMsg{text: text + " · changes re-applied", reload: true}
+	}
+}
+
+func (m model) discardSwitch(target string, isCommit bool) tea.Cmd {
+	r := m.repo
+	return func() tea.Msg {
+		if err := r.DiscardAll(); err != nil {
+			return actionMsg{err: err}
+		}
+		var text string
+		var err error
+		if isCommit {
+			text, err = r.CheckoutCommit(target)
+		} else {
+			text, err = r.CheckoutBranch(target)
+		}
+		if err != nil {
+			return actionMsg{err: err}
+		}
+		return actionMsg{text: text + " · local changes discarded", reload: true}
+	}
 }
 
 func fileKey(f FileStatus) string {
@@ -498,6 +582,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, autoFetchTick()
 
+	case checkoutBlockedMsg:
+		m.choiceTitle = "You have local changes — switch to " + msg.desc + "?"
+		m.choiceSel = 0
+		m.choiceOptions = []choiceOption{
+			{label: "Don't switch — keep working here", cmd: nil},
+			{label: "Stash changes, switch, re-apply them", cmd: m.stashSwitchReapply(msg.target, msg.isCommit)},
+			{label: "Discard changes and switch  ⚠ irreversible", cmd: m.discardSwitch(msg.target, msg.isCommit)},
+		}
+		return m, nil
+
 	case actionMsg:
 		if msg.err != nil {
 			m.flash, m.flashErr = msg.err.Error(), true
@@ -556,6 +650,38 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// modal: help overlay
 	if m.showHelp {
 		m.showHelp = false
+		return m, nil
+	}
+
+	// modal: choice popup
+	if len(m.choiceOptions) > 0 {
+		switch key {
+		case "esc", "q":
+			m.choiceTitle, m.choiceOptions = "", nil
+			m.flash, m.flashErr = "cancelled", false
+			return m, nil
+		case "j", "s", "down", "tab":
+			m.choiceSel = (m.choiceSel + 1) % len(m.choiceOptions)
+			return m, nil
+		case "k", "w", "up":
+			m.choiceSel = (m.choiceSel + len(m.choiceOptions) - 1) % len(m.choiceOptions)
+			return m, nil
+		case "enter":
+			cmd := m.choiceOptions[m.choiceSel].cmd
+			m.choiceTitle, m.choiceOptions = "", nil
+			if cmd == nil {
+				m.flash, m.flashErr = "staying put", false
+			}
+			return m, cmd
+		}
+		if n := int(key[0] - '0'); len(key) == 1 && n >= 1 && n <= len(m.choiceOptions) {
+			cmd := m.choiceOptions[n-1].cmd
+			m.choiceTitle, m.choiceOptions = "", nil
+			if cmd == nil {
+				m.flash, m.flashErr = "staying put", false
+			}
+			return m, cmd
+		}
 		return m, nil
 	}
 
@@ -878,6 +1004,78 @@ func (m model) handleCommitsKey(key string) (tea.Model, tea.Cmd) {
 	case "enter":
 		m.focus = focusRight
 		return m, nil
+	case "c":
+		c, ok := m.selectedCommit()
+		if !ok {
+			return m, nil
+		}
+		// prefer a local branch pointing at this commit over a detached HEAD
+		for _, ref := range c.Refs {
+			if ref.Kind == RefBranch || (ref.Kind == RefHead && ref.Name != "HEAD") {
+				return m, m.doCheckout(ref.Name, ref.Name, false)
+			}
+		}
+		return m, m.doCheckout(c.Hash, c.ShortHash(), true)
+	case "m":
+		c, ok := m.selectedCommit()
+		if !ok {
+			return m, nil
+		}
+		r := m.repo
+		hash := c.Hash
+		m.confirmMsg = "Merge " + c.ShortHash() + " into " + m.head.Branch + "? y/N"
+		m.confirmCmd = func() tea.Msg {
+			if err := r.Merge(hash); err != nil {
+				return actionMsg{err: err}
+			}
+			return actionMsg{text: "✓ merged " + hash[:8] + " into " + m.head.Branch, reload: true}
+		}
+		return m, nil
+	case "y":
+		c, ok := m.selectedCommit()
+		if !ok {
+			return m, nil
+		}
+		r := m.repo
+		hash := c.Hash
+		m.confirmMsg = "Cherry-pick " + c.ShortHash() + " onto " + m.head.Branch + "? y/N"
+		m.confirmCmd = func() tea.Msg {
+			if err := r.CherryPick(hash); err != nil {
+				return actionMsg{err: err}
+			}
+			return actionMsg{text: "✓ cherry-picked " + hash[:8] + " onto " + m.head.Branch, reload: true}
+		}
+		return m, nil
+	case "R":
+		c, ok := m.selectedCommit()
+		if !ok {
+			return m, nil
+		}
+		r := m.repo
+		hash := c.Hash
+		m.confirmMsg = "Rebase " + m.head.Branch + " onto " + c.ShortHash() + "? y/N"
+		m.confirmCmd = func() tea.Msg {
+			if err := r.Rebase(hash); err != nil {
+				return actionMsg{err: err}
+			}
+			return actionMsg{text: "✓ rebased " + m.head.Branch + " onto " + hash[:8], reload: true}
+		}
+		return m, nil
+	case "v":
+		c, ok := m.selectedCommit()
+		if !ok {
+			return m, nil
+		}
+		r := m.repo
+		hash := c.Hash
+		m.confirmMsg = "Revert " + c.ShortHash() + " (creates a new commit)? y/N"
+		m.confirmCmd = func() tea.Msg {
+			if err := r.Revert(hash); err != nil {
+				return actionMsg{err: err}
+			}
+			return actionMsg{text: "✓ reverted " + hash[:8], reload: true}
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -1019,13 +1217,30 @@ func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 			m.flash, m.flashErr = "already on "+b.Name, false
 			return m, nil
 		}
-		r := m.repo
-		return m, func() tea.Msg {
-			if err := r.Checkout(b.Name); err != nil {
-				return actionMsg{err: err}
-			}
-			return actionMsg{text: "✓ checked out " + b.Name, reload: true}
+		return m, m.doCheckout(b.Name, b.Name, false)
+	case "O":
+		if len(m.branches) == 0 {
+			return m, nil
 		}
+		url := m.repo.RemoteURL("origin")
+		if url == "" {
+			m.flash, m.flashErr = "no origin remote — press o to add one", true
+			return m, nil
+		}
+		b := m.branches[m.brSel]
+		branch := b.Name
+		if b.Remote {
+			if i := strings.Index(branch, "/"); i >= 0 {
+				branch = branch[i+1:]
+			}
+		}
+		pr := prURL(url, branch)
+		if err := openBrowser(pr); err != nil {
+			m.flash, m.flashErr = "could not open browser: "+pr, true
+			return m, nil
+		}
+		m.flash, m.flashErr = "✓ opened PR page for "+branch+" → "+pr, false
+		return m, nil
 	case "m":
 		if len(m.branches) == 0 {
 			return m, nil

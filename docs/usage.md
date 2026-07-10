@@ -45,6 +45,16 @@ connectors, badges for HEAD (green), local branches (blue), remotes (gray) and
 tags (amber). The right pane shows the selected commit's metadata, diffstat and
 full colorized patch. `/` filters live by subject, author or hash — `esc` clears.
 
+Act on the selected commit: `c` checks it out (jumping to a local branch when
+one points at it, detached HEAD otherwise), `m` merges it into your branch,
+`y` cherry-picks it, `R` rebases your branch onto it, `v` reverts it. All of
+these confirm before running.
+
+**Blocked switches**: if a checkout would clobber local changes, a popup opens
+instead of an error — choose *don't switch*, *stash → switch → re-apply*, or
+*discard changes* (irreversible). If the re-applied stash conflicts, the stash
+is kept and the conflicts appear in the Status view.
+
 ### ± Status
 Your working tree. `●` marks staged entries, `○` unstaged/untracked; the right
 pane previews each file's diff. `space` stages or unstages the selected file,
@@ -53,8 +63,11 @@ pane previews each file's diff. `space` stages or unstages the selected file,
 ### ⎇ Branches
 Local and remote branches sorted by last activity, with ahead/behind tracking
 info. The right pane shows the selected branch's history. `enter` checks a
-branch out (remote branches get a local tracking branch automatically), and
-`m` merges the selected branch into the current one after confirmation.
+branch out — for remote branches git2 switches to (or creates) the local
+tracking branch and says so explicitly. `m` merges the selected branch into
+the current one after confirmation, and `O` opens the pull-request page for
+the selected branch in your browser (GitHub, GitLab and Bitbucket URLs are
+recognized).
 
 ### ≡ Stashes
 Every stash with its age and message; the right pane previews the diff.
@@ -81,6 +94,9 @@ Navigation works three ways — arrows, WASD, or vim keys — pick your habit:
 | `ctrl+d` `ctrl+u` / `pgdn` `pgup` | half-page jump |
 | `g` / `G` | top / bottom |
 | `enter` | focus the diff pane · checkout branch |
+| `c` | checkout commit (commits view) |
+| `y` / `R` / `v` | cherry-pick · rebase onto · revert commit |
+| `O` | open PR page in browser (branches view) |
 | `/` | search commits |
 | `space` | stage / unstage file |
 | `c` | commit staged changes |
@@ -98,3 +114,15 @@ Navigation works three ways — arrows, WASD, or vim keys — pick your habit:
 
 Mouse: click a row to select it, click a tab to switch views, scroll wheel
 scrolls whichever pane the pointer is over.
+
+## Updating git2
+
+There is no background auto-update. Get the newest release any time with:
+
+```sh
+git2 update
+```
+
+It downloads the latest binary for your platform and replaces itself in place
+(on Windows a `git2.exe.old` leftover may remain — safe to delete). Re-running
+the install one-liner does the same thing.

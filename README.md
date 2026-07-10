@@ -21,9 +21,11 @@ it offers your recent repos and a directory browser to pick one.
 
 - **Commit graph** — colored branch lanes with rounded connectors, ref badges for HEAD,
   branches, remotes and tags, live search (`/`), full colorized patch in the details pane
+- **Commit actions** — checkout, merge, cherry-pick, rebase, revert right from the graph;
+  blocked by local changes? A popup offers stash-and-reapply or discard
 - **Status view** — stage/unstage with `space`, per-file diffs, commit with `c`
 - **Branches view** — local + remote branches with ahead/behind, checkout with `enter`,
-  merge with `m`
+  merge with `m`, open a pull-request page with `O`
 - **Remotes & syncing** — add origin from the TUI, fetch (`f`) with autofetch every 3 min,
   ff-only pull, push that auto-creates the remote branch, force-push with lease; auth rides
   on your existing SSH keys / credential helper ([details](docs/remotes.md))
@@ -49,6 +51,7 @@ irm https://raw.githubusercontent.com/osman-yahya/git2/main/install.ps1 | iex
 
 With Go 1.22+ you can also `go install github.com/osman-yahya/git2@latest`,
 or build from a checkout with `make install` (`PREFIX=~/.local` for no sudo).
+Update later with `git2 update`.
 
 Full platform guides, including manual installs and PATH setup:
 
@@ -77,6 +80,8 @@ See the **[usage guide](docs/usage.md)** for the picker, views, and every keybin
 | `← →` / `a d` / `tab` | switch pane |
 | `1` `2` `3` `4` | Commits · Status · Branches · Stashes |
 | `enter` | focus diff · checkout branch |
+| `c` / `y` / `R` / `v` | checkout · pick · rebase · revert commit |
+| `O` | open PR in browser |
 | `/` | search commits |
 | `space` / `c` / `S` | stage/unstage · commit · stash |
 | `f` / `p` / `P` | fetch · pull · push |

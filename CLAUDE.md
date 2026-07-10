@@ -2,8 +2,9 @@
 
 git2 is a Fork-inspired terminal git client (Go + Bubble Tea + Lip Gloss).
 Repo: https://github.com/osman-yahya/git2 · module `github.com/osman-yahya/git2`.
-Single `main` package, no internal packages, no test files yet — verification is
-done by driving the TUI through a PTY (see below).
+Single `main` package, no internal packages. Unit tests in `git2_test.go`
+(`go test ./...`) cover pure logic (graph layout, PR URLs); interactive behavior
+is verified by driving the TUI through a PTY (see below).
 
 ## Build & check
 
@@ -24,6 +25,7 @@ gofmt -w . && go vet ./...
 | `views.go` | all rendering; also `truncate`/`stripANSI`/`relTime` helpers |
 | `styles.go` | Lip Gloss styles, lane color palette (Tokyo Night-ish) |
 | `picker.go` | repo-picker TUI shown when launched outside a repo |
+| `update.go` | `git2 update` self-updater (downloads latest release, rename-swap) |
 | `config.go` | persisted state (recent repos, last browse dir) in `os.UserConfigDir()/git2/state.json` |
 
 ## Conventions
@@ -32,8 +34,12 @@ gofmt -w . && go vet ./...
 - Async work returns typed msgs (`commitsMsg`, `actionMsg{reload:true}` …); stale async
   results are guarded by comparing against the currently selected item (`detailFor`,
   `diffFor`, `brLogFor`, `stDiffFor` pattern) — keep that when adding loaders.
-- Destructive actions (force push, merge, stash drop) go through the confirm modal
-  (`m.confirmMsg` + `m.confirmCmd`); text entry through the prompt modal (`m.promptMode`).
+- Destructive actions (force push, merge/rebase/cherry-pick/revert, stash drop) go
+  through the confirm modal (`m.confirmMsg` + `m.confirmCmd`); text entry through the
+  prompt modal (`m.promptMode`); multi-option decisions (blocked checkout:
+  cancel/stash/discard) through the choice popup (`m.choiceOptions`, opened via
+  `checkoutBlockedMsg`). All checkouts go through `m.doCheckout` so the popup logic
+  stays centralized.
 - Key aliases everywhere: arrows / `w s a d` / `j k h l`. `s` means *down*, so it can't
   be a mnemonic (stage = `space`, stash = `S`). New keys must be added to the footer
   hints and the `?` help overlay in views.go, plus docs/usage.md and README.
@@ -62,6 +68,10 @@ For remote-feature tests, use a local bare repo (`git init --bare origin.git`) a
 - macOS `script` does not forward piped stdin to the PTY; the Python harness is the way.
 - The GitHub API may return a stale/empty asset list right after upload — re-query
   before concluding an upload failed.
+- `%(refname:short)` of `refs/remotes/origin/HEAD` is just `origin` — filter symbolic
+  remote HEADs by the FULL refname or a phantom "origin" branch appears whose checkout
+  detaches HEAD.
+- Never drive the `O` (open PR) key in PTY tests — it really opens the user's browser.
 
 ## Release process
 
