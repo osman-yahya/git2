@@ -1,6 +1,18 @@
 # Install on Windows
 
-## Prerequisites
+## Quick install (recommended)
+
+In PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/osman-yahya/git2/main/install.ps1 | iex
+```
+
+Downloads the latest release binary to `%LOCALAPPDATA%\Programs\git2`, adds
+that folder to your **user PATH** automatically, and verifies the install. No
+admin rights or Go required — open a new terminal afterwards and run `git2`.
+
+## Manual install — prerequisites
 
 - **git** — [git-scm.com/download/win](https://git-scm.com/download/win) (Git for Windows)
 - **Go 1.22+** to build from source — [go.dev/dl](https://go.dev/dl/)
@@ -12,7 +24,7 @@
 In PowerShell:
 
 ```powershell
-git clone <repo-url> git2 ; cd git2    # or use your existing checkout
+git clone https://github.com/osman-yahya/git2.git ; cd git2    # or use your existing checkout
 go build -trimpath -ldflags "-s -w" -o git2.exe .
 ```
 

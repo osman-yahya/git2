@@ -1,6 +1,17 @@
 # Install on Linux
 
-## Prerequisites
+## Quick install (recommended)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/osman-yahya/git2/main/install.sh | sh
+```
+
+Downloads the latest release binary for your CPU, installs it to
+`/usr/local/bin` (or `~/.local/bin` without write access) and clears the
+quarantine flag. No Go required. Prefer `go install`? Use
+`go install github.com/osman-yahya/git2@latest`.
+
+## Manual install — prerequisites
 
 - **git** — `apt install git` / `dnf install git` / `pacman -S git`
 - **Go 1.22+** to build from source — your package manager or [go.dev/dl](https://go.dev/dl/)
@@ -8,7 +19,7 @@
 ## Build & install
 
 ```sh
-git clone <repo-url> git2 && cd git2   # or use your existing checkout
+git clone https://github.com/osman-yahya/git2.git && cd git2   # or use your existing checkout
 sudo make install                       # builds and copies to /usr/local/bin/git2
 ```
 

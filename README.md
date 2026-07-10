@@ -35,14 +35,22 @@ it offers your recent repos and a directory browser to pick one.
 
 ## Install
 
-**Quick version** (macOS / Linux, needs Go 1.22+):
+**One line, no Go required** — grabs the latest release binary and puts `git2` on your PATH:
 
 ```sh
-make install              # → /usr/local/bin/git2  (sudo if needed)
-make install PREFIX=~/.local   # no-sudo alternative
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/osman-yahya/git2/main/install.sh | sh
 ```
 
-Full platform guides, including Windows and PATH setup:
+```powershell
+# Windows (PowerShell) — installs to %LOCALAPPDATA%\Programs\git2 and adds it to PATH
+irm https://raw.githubusercontent.com/osman-yahya/git2/main/install.ps1 | iex
+```
+
+With Go 1.22+ you can also `go install github.com/osman-yahya/git2@latest`,
+or build from a checkout with `make install` (`PREFIX=~/.local` for no sudo).
+
+Full platform guides, including manual installs and PATH setup:
 
 - [macOS](docs/install-macos.md)
 - [Linux](docs/install-linux.md)

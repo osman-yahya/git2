@@ -1,4 +1,4 @@
-module git2
+module github.com/osman-yahya/git2
 
 go 1.25.0
 
