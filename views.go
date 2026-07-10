@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-var tabLabels = []string{"⌥ Commits", "± Status", "⎇ Branches"}
+var tabLabels = []string{"⌥ Commits", "± Status", "⎇ Branches", "≡ Stashes"}
 
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
@@ -28,6 +28,8 @@ func (m model) View() string {
 		body = m.renderStatusView()
 	case viewBranches:
 		body = m.renderBranchesView()
+	case viewStashes:
+		body = m.renderStashesView()
 	}
 	if m.showHelp {
 		body = m.overlay(body, m.renderHelp())
@@ -64,6 +66,11 @@ func (m model) renderHeader() string {
 	} else {
 		parts = append(parts, "✓ clean")
 	}
+	if m.fetching {
+		parts = append(parts, "⇣ fetching…")
+	} else if !m.head.HasRemote {
+		parts = append(parts, "no remote")
+	}
 	right := sHeaderInfo.Render(strings.Join(parts, "  "))
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
@@ -97,13 +104,17 @@ func (m model) renderTabs() string {
 }
 
 func (m model) renderFooter() string {
+	if m.confirmMsg != "" {
+		return sFooter.Width(m.width).Render(sStatusM.Background(cBarBg).
+			Render("⚠ " + m.confirmMsg))
+	}
 	if m.searching {
 		return sFooter.Width(m.width).Render(m.searchInput.View() + "  " +
 			sDim.Render("enter apply · esc clear"))
 	}
-	if m.committing {
-		return sFooter.Width(m.width).Render(m.commitInput.View() + "  " +
-			sDim.Render("enter commit · esc cancel"))
+	if m.promptMode != promptNone {
+		return sFooter.Width(m.width).Render(m.promptInput.View() + "  " +
+			sDim.Render("enter confirm · esc cancel"))
 	}
 	if m.flash != "" {
 		style := sOk
@@ -118,13 +129,15 @@ func (m model) renderFooter() string {
 	var hints []hint
 	switch m.view {
 	case viewCommits:
-		hints = []hint{{"↑↓", "navigate"}, {"⏎", "diff"}, {"tab", "pane"}, {"/", "search"}}
+		hints = []hint{{"↑↓", "navigate"}, {"⏎", "diff"}, {"/", "search"}, {"f", "fetch"}, {"P", "push"}}
 	case viewStatus:
-		hints = []hint{{"↑↓", "navigate"}, {"space", "stage"}, {"c", "commit"}, {"tab", "pane"}}
+		hints = []hint{{"↑↓", "navigate"}, {"space", "stage"}, {"c", "commit"}, {"S", "stash"}}
 	case viewBranches:
-		hints = []hint{{"↑↓", "navigate"}, {"⏎", "checkout"}, {"tab", "pane"}}
+		hints = []hint{{"↑↓", "navigate"}, {"⏎", "checkout"}, {"m", "merge"}, {"p", "pull"}, {"P", "push"}}
+	case viewStashes:
+		hints = []hint{{"↑↓", "navigate"}, {"⏎", "apply"}, {"p", "pop"}, {"x", "drop"}}
 	}
-	hints = append(hints, hint{"1·2·3", "views"}, hint{"r", "refresh"}, hint{"?", "help"}, hint{"q", "quit"})
+	hints = append(hints, hint{"1-4", "views"}, hint{"?", "help"}, hint{"q", "quit"})
 
 	var parts []string
 	for _, h := range hints {
@@ -530,6 +543,62 @@ func (m model) renderBranchLog(width int) string {
 	return b.String()
 }
 
+// ---- stashes view ----
+
+func (m model) renderStashesView() string {
+	lw, rw := m.leftWidth(), m.rightWidth()
+	title := fmt.Sprintf("Stashes · %d", len(m.stashes))
+	left := m.pane(title, m.renderStashList(lw-2), lw, m.focus == focusLeft)
+
+	diffTitle := "Stash diff"
+	if m.stDiffFor != "" {
+		diffTitle = "Stash diff · " + m.stDiffFor
+	}
+	right := m.pane(diffTitle, m.renderDiffLines(m.stDiff, m.stDiffOff, rw-2), rw, m.focus == focusRight)
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+}
+
+func (m model) renderStashList(width int) string {
+	if len(m.stashes) == 0 {
+		return sDim.Render("  no stashes") + "\n\n" +
+			sDim.Render("  press S in the Status view to stash your changes")
+	}
+	h := m.listHeight()
+	var b strings.Builder
+	rendered := 0
+	for i := m.stOff; i < len(m.stashes) && rendered < h; i++ {
+		st := m.stashes[i]
+		selected := i == m.stSel
+		bg := lipgloss.NewStyle()
+		if selected {
+			bg = bg.Background(cSelBg)
+		}
+		refStyle := lipgloss.NewStyle().Foreground(cMagenta).Bold(true)
+		descStyle := sText
+		ageStyle := sDim
+		if selected {
+			refStyle = refStyle.Background(cSelBg)
+			descStyle = sBright.Background(cSelBg)
+			ageStyle = ageStyle.Background(cSelBg)
+		}
+		age := st.Age
+		descW := width - len([]rune(st.Ref)) - len([]rune(age)) - 5
+		desc := truncate(st.Desc, max(descW, 8))
+		line := bg.Render(" ") + refStyle.Render(st.Ref) + bg.Render(" ") + descStyle.Render(desc)
+		gap := width - lipgloss.Width(line) - len([]rune(age)) - 1
+		if gap > 0 {
+			line += bg.Render(strings.Repeat(" ", gap))
+		}
+		line += ageStyle.Render(age + " ")
+		b.WriteString(line)
+		rendered++
+		if rendered < h {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 // ---- diff rendering ----
 
 func (m model) renderDiffLines(lines []string, offset, width int) string {
@@ -588,15 +657,22 @@ func styleDiffLine(line string, width int) string {
 
 func (m model) renderHelp() string {
 	rows := [][2]string{
-		{"1 / 2 / 3", "commits · status · branches"},
+		{"1 / 2 / 3 / 4", "commits · status · branches · stashes"},
 		{"tab / ← → / a d", "switch pane focus"},
 		{"↑ ↓ / w s / j k", "move selection / scroll"},
 		{"ctrl+d ctrl+u", "half-page down / up"},
 		{"g / G", "jump to top / bottom"},
-		{"enter", "focus diff · checkout branch"},
+		{"enter", "focus diff · checkout · apply stash"},
 		{"/", "search commits"},
 		{"space", "stage / unstage file"},
 		{"c", "commit staged changes"},
+		{"S", "stash working tree (status view)"},
+		{"m", "merge branch into current (branches view)"},
+		{"f", "fetch all remotes (auto every 3 min)"},
+		{"p", "pull (fast-forward) · pop stash"},
+		{"P / F", "push · force-push with lease"},
+		{"o", "add / show origin remote"},
+		{"x", "drop stash"},
 		{"r", "refresh"},
 		{"?", "toggle this help"},
 		{"q", "quit"},

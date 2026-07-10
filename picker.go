@@ -231,9 +231,9 @@ func (p pickerModel) View() string {
 			b.WriteString(truncateANSI(line, p.width-2) + "\n")
 		}
 	} else {
-		b.WriteString(sPaneTitle.Render(" " + collapseHome(p.dir)) + "\n")
+		b.WriteString(sPaneTitle.Render(" "+collapseHome(p.dir)) + "\n")
 		if p.errMsg != "" {
-			b.WriteString(sErr.Render("  " + p.errMsg) + "\n")
+			b.WriteString(sErr.Render("  "+p.errMsg) + "\n")
 		} else if len(p.entries) == 0 {
 			b.WriteString(sDim.Render("  (no subdirectories)") + "\n")
 		}

@@ -37,7 +37,7 @@ Delete the file to reset history.
 
 ## Views
 
-The tab bar switches between three views (`1` / `2` / `3`, or click):
+The tab bar switches between four views (`1`–`4`, or click):
 
 ### ⌥ Commits
 The commit tree across **all** branches: colored lanes with fork/merge
@@ -53,7 +53,22 @@ pane previews each file's diff. `space` stages or unstages the selected file,
 ### ⎇ Branches
 Local and remote branches sorted by last activity, with ahead/behind tracking
 info. The right pane shows the selected branch's history. `enter` checks a
-branch out (remote branches get a local tracking branch automatically).
+branch out (remote branches get a local tracking branch automatically), and
+`m` merges the selected branch into the current one after confirmation.
+
+### ≡ Stashes
+Every stash with its age and message; the right pane previews the diff.
+`enter` applies, `p` pops, `x` drops (with confirmation). Create stashes from
+the Status view with `S`.
+
+## Remotes & syncing
+
+`f` fetches (and git2 autofetches every 3 minutes), `p` pulls fast-forward
+only, `P` pushes — creating the remote branch automatically when there's no
+upstream — and `F` force-pushes with lease after confirmation. `o` adds or
+shows the origin remote. Authentication uses your existing git setup (SSH
+keys, credential helper, `gh auth`); see **[remotes.md](remotes.md)** for
+details.
 
 ## Controls
 
@@ -69,7 +84,14 @@ Navigation works three ways — arrows, WASD, or vim keys — pick your habit:
 | `/` | search commits |
 | `space` | stage / unstage file |
 | `c` | commit staged changes |
-| `1` `2` `3` | switch view |
+| `S` | stash working tree (status view) |
+| `m` | merge selected branch (branches view) |
+| `f` | fetch all remotes |
+| `p` | pull ff-only · pop stash |
+| `P` / `F` | push · force-push (with lease) |
+| `o` | add / show origin |
+| `x` | drop stash |
+| `1` `2` `3` `4` | switch view |
 | `r` | refresh |
 | `?` | help overlay |
 | `q` / `ctrl+c` | quit |

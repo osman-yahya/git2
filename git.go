@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -178,11 +179,12 @@ func (r *Repo) CommitDetails(hash string) ([]string, error) {
 // ---- head / status ----
 
 type HeadInfo struct {
-	Branch   string
-	Detached bool
-	Ahead    int
-	Behind   int
-	Dirty    int
+	Branch    string
+	Detached  bool
+	Ahead     int
+	Behind    int
+	Dirty     int
+	HasRemote bool
 }
 
 func (r *Repo) Head() HeadInfo {
@@ -206,6 +208,9 @@ func (r *Repo) Head() HeadInfo {
 				h.Dirty++
 			}
 		}
+	}
+	if out, err := r.git("remote"); err == nil {
+		h.HasRemote = strings.TrimSpace(out) != ""
 	}
 	return h
 }
@@ -372,4 +377,167 @@ func (r *Repo) BranchLog(name string, limit int) ([]string, error) {
 		}
 	}
 	return lines, nil
+}
+
+// ---- remotes / network ----
+
+// gitNet runs a network-touching git command with terminal prompts disabled
+// (credentials must come from SSH keys or a credential helper — an interactive
+// prompt would deadlock the TUI) and a hard timeout.
+func (r *Repo) gitNet(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	full := append([]string{"-C", r.Root, "-c", "color.ui=false"}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		if ctx.Err() != nil {
+			msg = "network operation timed out"
+		}
+		if strings.Contains(msg, "terminal prompts disabled") ||
+			strings.Contains(msg, "Authentication failed") ||
+			strings.Contains(msg, "could not read Username") {
+			msg = "authentication required — set up SSH keys or a credential helper (see docs/remotes.md)"
+		}
+		if strings.Contains(msg, "'origin' does not appear") {
+			msg = "no remote 'origin' — press o to add one"
+		}
+		return "", errors.New(msg)
+	}
+	return stdout.String(), nil
+}
+
+func (r *Repo) RemoteURL(name string) string {
+	out, err := r.git("remote", "get-url", name)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+func (r *Repo) AddRemote(name, url string) error {
+	_, err := r.git("remote", "add", name, url)
+	return err
+}
+
+func (r *Repo) Fetch() error {
+	_, err := r.gitNet("fetch", "--all", "--prune")
+	return err
+}
+
+// Pull fast-forwards only; a diverged branch reports an error instead of
+// creating surprise merge commits.
+func (r *Repo) Pull() error {
+	_, err := r.gitNet("pull", "--ff-only")
+	return err
+}
+
+// Push pushes the current branch. Without an upstream it pushes with -u to
+// origin, creating the remote branch. force uses --force-with-lease, which
+// refuses to overwrite commits you haven't seen.
+func (r *Repo) Push(force bool) (string, error) {
+	out, err := r.git("symbolic-ref", "--short", "-q", "HEAD")
+	branch := strings.TrimSpace(out)
+	if err != nil || branch == "" {
+		return "", errors.New("cannot push: detached HEAD")
+	}
+	args := []string{"push"}
+	if force {
+		args = append(args, "--force-with-lease")
+	}
+	if _, uerr := r.git("rev-parse", "--abbrev-ref", branch+"@{upstream}"); uerr != nil {
+		args = append(args, "-u", "origin", branch)
+		if _, err := r.gitNet(args...); err != nil {
+			return "", err
+		}
+		return "✓ pushed & created origin/" + branch, nil
+	}
+	if _, err := r.gitNet(args...); err != nil {
+		return "", err
+	}
+	if force {
+		return "✓ force-pushed " + branch + " (with lease)", nil
+	}
+	return "✓ pushed " + branch, nil
+}
+
+// ---- stashes ----
+
+type Stash struct {
+	Ref  string // stash@{0}
+	Age  string
+	Desc string
+}
+
+func (r *Repo) Stashes() ([]Stash, error) {
+	out, err := r.git("stash", "list", "--format=%gd\x1f%cr\x1f%gs")
+	if err != nil {
+		return nil, err
+	}
+	var stashes []Stash
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\x1f", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		stashes = append(stashes, Stash{Ref: parts[0], Age: parts[1], Desc: parts[2]})
+	}
+	return stashes, nil
+}
+
+func (r *Repo) StashPush(message string) error {
+	args := []string{"stash", "push", "--include-untracked"}
+	if message != "" {
+		args = append(args, "-m", message)
+	}
+	_, err := r.git(args...)
+	return err
+}
+
+func (r *Repo) StashApply(ref string) error {
+	_, err := r.git("stash", "apply", ref)
+	return err
+}
+
+func (r *Repo) StashPop(ref string) error {
+	_, err := r.git("stash", "pop", ref)
+	return err
+}
+
+func (r *Repo) StashDrop(ref string) error {
+	_, err := r.git("stash", "drop", ref)
+	return err
+}
+
+func (r *Repo) StashDiff(ref string) ([]string, error) {
+	out, err := r.git("stash", "show", "-p", "--include-untracked", ref)
+	if err != nil {
+		// older git can't combine show -p with --include-untracked
+		out, err = r.git("stash", "show", "-p", ref)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var lines []string
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		lines = append(lines, strings.ReplaceAll(l, "\t", "    "))
+	}
+	return lines, nil
+}
+
+// ---- merge ----
+
+func (r *Repo) Merge(name string) error {
+	_, err := r.git("merge", "--no-edit", name)
+	return err
 }

@@ -22,7 +22,12 @@ it offers your recent repos and a directory browser to pick one.
 - **Commit graph** — colored branch lanes with rounded connectors, ref badges for HEAD,
   branches, remotes and tags, live search (`/`), full colorized patch in the details pane
 - **Status view** — stage/unstage with `space`, per-file diffs, commit with `c`
-- **Branches view** — local + remote branches with ahead/behind, checkout with `enter`
+- **Branches view** — local + remote branches with ahead/behind, checkout with `enter`,
+  merge with `m`
+- **Remotes & syncing** — add origin from the TUI, fetch (`f`) with autofetch every 3 min,
+  ff-only pull, push that auto-creates the remote branch, force-push with lease; auth rides
+  on your existing SSH keys / credential helper ([details](docs/remotes.md))
+- **Stashes** — stash with untracked files (`S`), preview diffs, apply / pop / drop
 - **Repo picker** — launched outside a repo? Choose from recent repos or browse the
   filesystem; the last location is remembered
 - **Controls that fit your hands** — arrows, WASD, or vim keys; full mouse support
@@ -42,6 +47,7 @@ Full platform guides, including Windows and PATH setup:
 - [macOS](docs/install-macos.md)
 - [Linux](docs/install-linux.md)
 - [Windows](docs/install-windows.md)
+- [Remotes & authentication](docs/remotes.md)
 
 Cross-compiled binaries for all five targets: `make release` → `dist/`.
 
@@ -61,10 +67,11 @@ See the **[usage guide](docs/usage.md)** for the picker, views, and every keybin
 | --- | --- |
 | `↑ ↓` / `w s` / `j k` | move · scroll |
 | `← →` / `a d` / `tab` | switch pane |
-| `1` `2` `3` | Commits · Status · Branches |
+| `1` `2` `3` `4` | Commits · Status · Branches · Stashes |
 | `enter` | focus diff · checkout branch |
 | `/` | search commits |
-| `space` / `c` | stage/unstage · commit |
+| `space` / `c` / `S` | stage/unstage · commit · stash |
+| `f` / `p` / `P` | fetch · pull · push |
 | `?` / `q` | help · quit |
 
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and
