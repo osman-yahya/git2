@@ -79,7 +79,8 @@ For remote-feature tests, use a local bare repo (`git init --bare origin.git`) a
   detaches HEAD.
 - Never drive the `O` (open PR) key in PTY tests — it really opens the user's browser.
 - The View is a strict height budget: header 1 + tab bar 2 (label + underline) + body
-  (`bodyHeight` = h-4) + footer 1. If any bar wraps (long footer hints!) bubbletea trims
+  (`bodyHeight` = h-5) + message line 1 + footer 1. Confirm/prompt/search/flash render on
+  the message line (renderMsgLine); the footer is hints-only and must stay MaxHeight(1). If any bar wraps (long footer hints!) bubbletea trims
   the TOP line — the header silently disappears. Keep footers MaxHeight(1) and short.
 - `git status --porcelain` shows untracked dirs as one `dir/` entry — always pass `-uall`.
 - Mouse row mapping starts at msg.Y-4 (header + 2-line tabs + border).

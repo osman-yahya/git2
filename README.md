@@ -25,15 +25,17 @@ it offers your recent repos and a directory browser to pick one.
   graph; blocked by local changes? A popup offers stash-and-reapply or discard. `b` switches
   branch in place, `t` focuses the graph on the current branch
 - **Status view** — file tree with clean per-file diffs, stage/unstage with `space` or
-  double-click, stashes gathered at the bottom, conflict resolution + merge abort/commit
+  double-click, discard (`D`), amend (`A`), per-file history (`H`), stashes gathered at
+  the bottom, conflict resolution + merge abort/commit
 - **Branches view** — local + remote branches with ahead/behind, checkout with `enter`,
-  merge with `m`, open a pull-request page with `O`
+  create/rename/delete (`n`/`e`/`x`), merge with `m`, open a pull-request page with `O`
+- **Tags** — create or delete tags right on the graph (`T`)
 - **Remotes & syncing** — add origin from the TUI, fetch (`f`) with autofetch every 3 min,
   ff-only pull, push that auto-creates the remote branch, force-push with lease; auth rides
   on your existing SSH keys / credential helper ([details](docs/remotes.md))
 - **Stashes** — stash with untracked files (`S`), preview diffs, apply / pop / drop
-- **Repo picker** — launched outside a repo? Choose from recent repos or browse the
-  filesystem; the last location is remembered
+- **Repo picker** — launched outside a repo? Choose from recent repos, browse the
+  filesystem, clone a URL (`c`) or init a new repo (`i`); the last location is remembered
 - **Controls that fit your hands** — arrows, WASD, or vim keys; full mouse support
   (click rows/tabs, scroll wheel); adapts to light and dark terminals
 

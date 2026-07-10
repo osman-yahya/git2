@@ -1,5 +1,5 @@
 BIN     := git2
-VERSION := 0.5.0
+VERSION := 0.6.0
 DIST    := dist
 
 # where `make install` puts the binary (override: make install PREFIX=~/.local)

@@ -748,3 +748,116 @@ func stashMeta(desc string) (branch, msg string) {
 	}
 	return "", desc
 }
+
+// ---- v0.6: discard, amend, tags, branch admin, file history ----
+
+// DiscardFile throws away changes to one file: untracked files are deleted,
+// tracked files restored from HEAD (index and worktree).
+func (r *Repo) DiscardFile(f FileStatus) error {
+	target := statusTarget(f.Path)
+	if f.Untracked {
+		_, err := r.git("clean", "-f", "--", target)
+		return err
+	}
+	_, err := r.git("restore", "--staged", "--worktree", "--source=HEAD", "--", target)
+	return err
+}
+
+// LastCommitMessage returns the full message of HEAD (for amend prefill).
+func (r *Repo) LastCommitMessage() string {
+	out, err := r.git("log", "-1", "--pretty=%s")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+func (r *Repo) CommitAmend(message string) error {
+	_, err := r.git("commit", "--amend", "-m", message)
+	return err
+}
+
+func (r *Repo) CreateTag(name, hash string) error {
+	_, err := r.git("tag", name, hash)
+	return err
+}
+
+func (r *Repo) DeleteTag(name string) error {
+	_, err := r.git("tag", "-d", name)
+	return err
+}
+
+func (r *Repo) DeleteBranch(name string, force bool) error {
+	flag := "-d"
+	if force {
+		flag = "-D"
+	}
+	_, err := r.git("branch", flag, name)
+	return err
+}
+
+func (r *Repo) RenameBranch(oldName, newName string) error {
+	_, err := r.git("branch", "-m", oldName, newName)
+	return err
+}
+
+// FileHistory returns a compact log of every commit touching a path.
+func (r *Repo) FileHistory(path string, limit int) ([]string, error) {
+	out, err := r.git("log", "--follow", "-n", strconv.Itoa(limit),
+		"--pretty=format:%h\x1f%ad\x1f%an\x1f%s", "--date=format:%Y-%m-%d", "--", path)
+	if err != nil {
+		return nil, err
+	}
+	lines := []string{"history of " + path, ""}
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		parts := strings.SplitN(l, "\x1f", 4)
+		if len(parts) == 4 {
+			lines = append(lines, fmt.Sprintf("%s  %s  %-18s %s", parts[0], parts[1], truncate(parts[2], 18), parts[3]))
+		}
+	}
+	if len(lines) == 2 {
+		lines = append(lines, "(no commits touch this file)")
+	}
+	return lines, nil
+}
+
+// Clone clones a URL into dir (network op, no prompts).
+func gitClone(url, dest string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "clone", "--", url, dest)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return errors.New(msg)
+	}
+	return nil
+}
+
+func gitInit(dir string) error {
+	out, err := exec.Command("git", "init", dir).CombinedOutput()
+	if err != nil {
+		return errors.New(strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// TagsAt lists tag names pointing at a commit.
+func (r *Repo) TagsAt(hash string) []string {
+	out, err := r.git("tag", "--points-at", hash)
+	if err != nil {
+		return nil
+	}
+	var tags []string
+	for _, t := range strings.Split(strings.TrimSpace(out), "\n") {
+		if t != "" {
+			tags = append(tags, t)
+		}
+	}
+	return tags
+}

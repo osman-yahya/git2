@@ -32,6 +32,9 @@ const (
 	promptStash
 	promptOrigin
 	promptBranch
+	promptAmend
+	promptTag
+	promptRename
 )
 
 const (
@@ -106,6 +109,9 @@ type model struct {
 
 	// pending base for the new-branch prompt ("" = HEAD)
 	branchBase string
+	// pending targets for tag / rename prompts
+	tagTarget  string
+	renameFrom string
 
 	// double-click detection
 	lastClickAt time.Time
@@ -222,6 +228,8 @@ type fetchDoneMsg struct {
 }
 type autoFetchMsg struct{}
 type flashTickMsg struct{}
+type openTagPromptMsg struct{ hash string }
+type branchDeleteBlockedMsg struct{ name string }
 type branchPopupMsg struct{ branches []Branch }
 
 type choiceOption struct {
@@ -471,6 +479,15 @@ func (m model) toggleStage(it statusItem) tea.Cmd {
 	}
 }
 
+func (m model) loadFileHistory(f FileStatus) tea.Cmd {
+	r := m.repo
+	path := statusTarget(f.Path)
+	return func() tea.Msg {
+		lines, err := r.FileHistory(path, 200)
+		return fileDiffMsg{"hist:" + path, lines, err}
+	}
+}
+
 // checkoutSelectedCommit prefers a local branch pointing at the commit.
 func (m model) checkoutSelectedCommit() tea.Cmd {
 	c, ok := m.selectedCommit()
@@ -566,8 +583,8 @@ func (m model) Init() tea.Cmd {
 
 // ---- geometry helpers ----
 
-// header (1) + tab bar with its underline (2) + footer (1)
-func (m model) bodyHeight() int { return max(m.height-4, 1) }
+// header (1) + tab bar with its underline (2) + message line (1) + footer (1)
+func (m model) bodyHeight() int { return max(m.height-5, 1) }
 
 // listHeight is the number of content rows inside a bordered pane.
 func (m model) listHeight() int { return max(m.bodyHeight()-2, 1) }
@@ -694,7 +711,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setFlash(msg.err.Error(), true)
 			return m, nil
 		}
-		if len(m.statusItems) > 0 && m.fileSel < len(m.statusItems) && itemKey(m.statusItems[m.fileSel]) == msg.key {
+		match := false
+		if len(m.statusItems) > 0 && m.fileSel < len(m.statusItems) {
+			it := m.statusItems[m.fileSel]
+			match = itemKey(it) == msg.key ||
+				(!it.isStash && msg.key == "hist:"+statusTarget(it.file.Path))
+		}
+		if match {
 			m.fileDiff, m.diffFor, m.diffOff = msg.lines, msg.key, 0
 		}
 		return m, nil
@@ -808,6 +831,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flash = ""
 		}
 		return m, flashTick()
+
+	case branchDeleteBlockedMsg:
+		name := msg.name
+		r := m.repo
+		m.choiceTitle = name + " has commits that are not merged anywhere"
+		m.choiceSel = 0
+		m.choiceOptions = []choiceOption{
+			{label: "Keep the branch", cmd: nil},
+			{label: "Force delete — the commits will be lost  ⚠", cmd: func() tea.Msg {
+				if err := r.DeleteBranch(name, true); err != nil {
+					return actionMsg{err: err}
+				}
+				return actionMsg{text: "✓ force-deleted branch " + name, reload: true}
+			}},
+		}
+		return m, nil
+
+	case openTagPromptMsg:
+		m.tagTarget = msg.hash
+		return m, m.openPrompt(promptTag, "⌂ ", "tag name for "+msg.hash[:min(8, len(msg.hash))])
 
 	case branchPopupMsg:
 		var opts []choiceOption
@@ -940,7 +983,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if mode == promptOrigin && value == "" {
 				return m, nil
 			}
-			if mode == promptBranch && value == "" {
+			if (mode == promptBranch || mode == promptAmend || mode == promptTag || mode == promptRename) && value == "" {
 				return m, nil
 			}
 			m.promptMode = promptNone
@@ -979,6 +1022,29 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						from = " at " + base[:min(8, len(base))]
 					}
 					return actionMsg{text: "✓ created & switched to " + value + from, reload: true}
+				}
+			case promptAmend:
+				return m, func() tea.Msg {
+					if err := r.CommitAmend(value); err != nil {
+						return actionMsg{err: err}
+					}
+					return actionMsg{text: "✓ amended: " + value, reload: true, gotoCommits: true}
+				}
+			case promptTag:
+				hash := m.tagTarget
+				return m, func() tea.Msg {
+					if err := r.CreateTag(value, hash); err != nil {
+						return actionMsg{err: err}
+					}
+					return actionMsg{text: "✓ tagged " + hash[:min(8, len(hash))] + " as " + value, reload: true}
+				}
+			case promptRename:
+				oldName := m.renameFrom
+				return m, func() tea.Msg {
+					if err := r.RenameBranch(oldName, value); err != nil {
+						return actionMsg{err: err}
+					}
+					return actionMsg{text: "✓ renamed " + oldName + " → " + value, reload: true}
 				}
 			}
 			return m, nil
@@ -1266,6 +1332,32 @@ func (m model) handleCommitsKey(key string) (tea.Model, tea.Cmd) {
 		}
 		m.branchBase = c.Hash
 		return m, m.openPrompt(promptBranch, "⎇ ", "new branch name (from "+c.ShortHash()+")")
+	case "T":
+		c, ok := m.selectedCommit()
+		if !ok {
+			return m, nil
+		}
+		tags := m.repo.TagsAt(c.Hash)
+		if len(tags) == 0 {
+			m.tagTarget = c.Hash
+			return m, m.openPrompt(promptTag, "⌂ ", "tag name for "+c.ShortHash())
+		}
+		// commit already tagged: offer create + delete
+		opts := []choiceOption{{label: "Create another tag on " + c.ShortHash(), cmd: func() tea.Msg { return openTagPromptMsg{c.Hash} }}}
+		r := m.repo
+		for _, t := range tags {
+			tag := t
+			opts = append(opts, choiceOption{label: "Delete tag " + tag, cmd: func() tea.Msg {
+				if err := r.DeleteTag(tag); err != nil {
+					return actionMsg{err: err}
+				}
+				return actionMsg{text: "✓ deleted tag " + tag, reload: true}
+			}})
+		}
+		m.choiceTitle = "Tags on " + c.ShortHash()
+		m.choiceOptions = opts
+		m.choiceSel = 0
+		return m, nil
 	case "m":
 		c, ok := m.selectedCommit()
 		if !ok {
@@ -1408,6 +1500,42 @@ func (m model) handleStatusKey(key string) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "D":
+		if len(m.statusItems) == 0 {
+			return m, nil
+		}
+		it := m.statusItems[m.fileSel]
+		if it.isStash {
+			return m, nil
+		}
+		f := it.file
+		r := m.repo
+		m.confirmMsg = "Discard changes to " + f.Path + "? This cannot be undone. y/N"
+		m.confirmCmd = func() tea.Msg {
+			if err := r.DiscardFile(f); err != nil {
+				return actionMsg{err: err}
+			}
+			return actionMsg{text: "✓ discarded " + f.Path, reload: true}
+		}
+		return m, nil
+	case "A":
+		cmd := m.openPrompt(promptAmend, "✎ ", "amend last commit message")
+		if msg := m.repo.LastCommitMessage(); msg != "" {
+			m.promptInput.SetValue(msg)
+		}
+		return m, cmd
+	case "H":
+		if len(m.statusItems) == 0 {
+			return m, nil
+		}
+		it := m.statusItems[m.fileSel]
+		if it.isStash {
+			return m, nil
+		}
+		if strings.HasPrefix(m.diffFor, "hist:") {
+			return m, m.loadItemDiff(it) // toggle back to the diff
+		}
+		return m, m.loadFileHistory(it.file)
 	case "X":
 		if !m.head.Merging {
 			return m, nil
@@ -1505,6 +1633,45 @@ func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 	case "n":
 		m.branchBase = ""
 		return m, m.openPrompt(promptBranch, "⎇ ", "new branch name (from "+m.head.Branch+")")
+	case "x":
+		if len(m.branches) == 0 {
+			return m, nil
+		}
+		b := m.branches[m.brSel]
+		if b.Remote {
+			m.setFlash("delete remote branches from the host — this removes local ones", true)
+			return m, nil
+		}
+		if b.Current {
+			m.setFlash("cannot delete the branch you are on", true)
+			return m, nil
+		}
+		r := m.repo
+		name := b.Name
+		m.confirmMsg = "Delete branch " + name + "? y/N"
+		m.confirmCmd = func() tea.Msg {
+			if err := r.DeleteBranch(name, false); err != nil {
+				if strings.Contains(err.Error(), "not fully merged") {
+					return branchDeleteBlockedMsg{name}
+				}
+				return actionMsg{err: err}
+			}
+			return actionMsg{text: "✓ deleted branch " + name, reload: true}
+		}
+		return m, nil
+	case "e":
+		if len(m.branches) == 0 {
+			return m, nil
+		}
+		b := m.branches[m.brSel]
+		if b.Remote {
+			m.setFlash("cannot rename a remote branch here", true)
+			return m, nil
+		}
+		m.renameFrom = b.Name
+		cmd := m.openPrompt(promptRename, "⎇ ", "new name for "+b.Name)
+		m.promptInput.SetValue(b.Name)
+		return m, cmd
 	case "O":
 		if len(m.branches) == 0 {
 			return m, nil

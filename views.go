@@ -40,6 +40,8 @@ func (m model) View() string {
 	}
 	b.WriteString(body)
 	b.WriteString("\n")
+	b.WriteString(m.renderMsgLine())
+	b.WriteString("\n")
 	b.WriteString(m.renderFooter())
 	return b.String()
 }
@@ -115,45 +117,98 @@ func (m model) renderTabs() string {
 	return row
 }
 
-func (m model) renderFooter() string {
-	if m.confirmMsg != "" {
-		return sFooter.Width(m.width).MaxHeight(1).Render(sStatusM.Background(cBarBg).
-			Render("⚠ " + m.confirmMsg))
-	}
-	if m.searching {
-		return sFooter.Width(m.width).MaxHeight(1).Render(m.searchInput.View() + "  " +
-			sDim.Render("enter apply · esc clear"))
-	}
-	if m.promptMode != promptNone {
-		return sFooter.Width(m.width).MaxHeight(1).Render(m.promptInput.View() + "  " +
-			sDim.Render("enter confirm · esc cancel"))
-	}
-	if m.flash != "" {
+// renderMsgLine is the dedicated line above the footer: confirmations,
+// prompts, search, flash messages — or a contextual breadcrumb when idle.
+func (m model) renderMsgLine() string {
+	bar := lipgloss.NewStyle().Background(cBarBg).Width(m.width).MaxHeight(1).Padding(0, 1)
+	switch {
+	case m.confirmMsg != "":
+		return bar.Render(sStatusM.Background(cBarBg).Bold(true).Render("⚠ "+m.confirmMsg) +
+			sHeaderInfo.Render("  · y confirm · any other key cancels"))
+	case m.searching:
+		return bar.Render(m.searchInput.View() + "  " + sHeaderInfo.Render("enter apply · esc clear"))
+	case m.promptMode != promptNone:
+		return bar.Render(m.promptInput.View() + "  " + sHeaderInfo.Render("enter confirm · esc cancel"))
+	case m.flash != "":
 		style := sOk
 		if m.flashErr {
 			style = sErr
 		}
-		return sFooter.Width(m.width).MaxHeight(1).Render(style.
-			Background(cBarBg).Render(truncate(m.flash, m.width-4)))
+		return bar.Render(style.Background(cBarBg).Render(truncate(m.flash, m.width-4)))
 	}
+	// idle: contextual breadcrumb about the selection
+	ctx := ""
+	switch m.view {
+	case viewCommits:
+		if c, ok := m.selectedCommit(); ok {
+			ctx = c.ShortHash() + " · " + c.Author + " · " + relTime(c.Date) + " · " + c.Subject
+		}
+	case viewStatus:
+		if len(m.statusItems) > 0 && m.fileSel < len(m.statusItems) {
+			it := m.statusItems[m.fileSel]
+			if it.isStash {
+				ctx = it.stash.Ref + " · " + it.stash.Desc
+			} else {
+				ctx = it.file.Path + " · " + statusCodeWord(it.file)
+			}
+		}
+	case viewBranches:
+		if len(m.branches) > 0 && m.brSel < len(m.branches) {
+			b := m.branches[m.brSel]
+			ctx = b.Name + " · " + b.Hash + " · " + b.Date
+			if b.Track != "" {
+				ctx += " · " + b.Track
+			}
+		}
+	case viewStashes:
+		if len(m.stashes) > 0 && m.stSel < len(m.stashes) {
+			st := m.stashes[m.stSel]
+			ctx = st.Ref + " · " + st.Desc + " · " + st.Age
+		}
+	}
+	return bar.Render(sHeaderInfo.Render(truncate(ctx, m.width-4)))
+}
 
+func statusCodeWord(f FileStatus) string {
+	switch {
+	case f.Conflict:
+		return "conflict — fix then space to resolve"
+	case f.Untracked:
+		return "untracked"
+	case f.Code == "D":
+		return "deleted"
+	case f.Code == "A":
+		return "added"
+	case f.Code == "R":
+		return "renamed"
+	case f.Staged:
+		return "staged"
+	default:
+		return "modified"
+	}
+}
+
+func (m model) renderFooter() string {
 	type hint struct{ key, label string }
 	var hints []hint
 	switch m.view {
 	case viewCommits:
-		hints = []hint{{"c", "checkout"}, {"b", "branch"}, {"t", "focus"}, {"n", "new"}, {"m·y·R·v", "merge·pick…"}, {"/", "search"}}
+		hints = []hint{{"c", "checkout"}, {"b", "branch"}, {"t", "focus"}, {"n", "new"}, {"T", "tag"},
+			{"m", "merge"}, {"y", "pick"}, {"R", "rebase"}, {"v", "revert"}, {"/", "search"}}
 	case viewStatus:
 		if m.head.Merging {
-			hints = []hint{{"space", "resolve"}, {"c", "commit merge"}, {"X", "abort merge"}}
+			hints = []hint{{"space", "resolve"}, {"c", "commit merge"}, {"X", "abort merge"}, {"D", "discard"}}
 		} else {
-			hints = []hint{{"space", "stage"}, {"c", "commit"}, {"S", "stash"}, {"⏎", "diff·apply"}}
+			hints = []hint{{"space", "stage"}, {"D", "discard"}, {"c", "commit"}, {"A", "amend"},
+				{"S", "stash"}, {"H", "history"}}
 		}
 	case viewBranches:
-		hints = []hint{{"⏎", "checkout"}, {"n", "new"}, {"m", "merge"}, {"O", "PR"}, {"p", "pull"}, {"P", "push"}}
+		hints = []hint{{"⏎", "checkout"}, {"n", "new"}, {"e", "rename"}, {"x", "delete"},
+			{"m", "merge"}, {"O", "PR"}, {"p", "pull"}, {"P", "push"}}
 	case viewStashes:
 		hints = []hint{{"⏎", "apply"}, {"p", "pop"}, {"x", "drop"}}
 	}
-	hints = append(hints, hint{"tab", "next view"}, hint{"?", "help"}, hint{"q", "quit"})
+	hints = append(hints, hint{"tab", "views"}, hint{"?", "help"}, hint{"q", "quit"})
 
 	var parts []string
 	for _, h := range hints {
@@ -743,6 +798,11 @@ func (m model) renderHelp() string {
 		{"b", "switch branch popup (commits view)"},
 		{"n", "new branch — from commit (commits) or HEAD (branches)"},
 		{"y / R / v", "cherry-pick · rebase onto · revert (commits view)"},
+		{"D", "discard file changes (status view)"},
+		{"A", "amend last commit (status view)"},
+		{"H", "file history (status view, toggles with diff)"},
+		{"T", "create / delete tag on commit"},
+		{"e / x", "rename / delete branch (branches view)"},
 		{"X", "abort merge (status view, during a merge)"},
 		{"dbl-click", "checkout · stage/unstage · apply stash"},
 		{"space", "stage / unstage file"},

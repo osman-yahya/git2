@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -41,10 +42,22 @@ type pickerModel struct {
 
 	choice string
 	errMsg string
+
+	// clone / init input
+	input     textinput.Model
+	inputMode int // 0 none, 1 clone url, 2 init name
+	busy      string
+}
+
+type cloneDoneMsg struct {
+	path string
+	err  error
 }
 
 func newPicker(state State) pickerModel {
-	p := pickerModel{state: state, recent: state.ExistingRecent()}
+	ti := textinput.New()
+	ti.CharLimit = 300
+	p := pickerModel{state: state, recent: state.ExistingRecent(), input: ti}
 	if len(p.recent) == 0 {
 		p.mode = pickBrowse
 	}
@@ -87,7 +100,7 @@ func (p *pickerModel) setDir(dir string) {
 
 func (p pickerModel) Init() tea.Cmd { return nil }
 
-func (p pickerModel) listHeight() int { return max(p.height-9, 3) }
+func (p pickerModel) listHeight() int { return max(p.height-10, 3) }
 
 func (p pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -95,7 +108,20 @@ func (p pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p.width, p.height = msg.Width, msg.Height
 		return p, nil
 	case tea.KeyMsg:
+		if p.inputMode != 0 && msg.String() != "esc" && msg.String() != "enter" {
+			var cmd tea.Cmd
+			p.input, cmd = p.input.Update(msg)
+			return p, cmd
+		}
 		return p.handleKey(msg.String())
+	case cloneDoneMsg:
+		p.busy = ""
+		if msg.err != nil {
+			p.errMsg = msg.err.Error()
+			return p, nil
+		}
+		p.choice = msg.path
+		return p, tea.Quit
 	case tea.MouseMsg:
 		if msg.Button == tea.MouseButtonWheelUp {
 			return p.move(-1)
@@ -121,10 +147,75 @@ func (p pickerModel) move(delta int) (tea.Model, tea.Cmd) {
 	return p, nil
 }
 
+func repoNameFromURL(url string) string {
+	name := strings.TrimSuffix(filepath.Base(strings.TrimSuffix(strings.TrimSpace(url), "/")), ".git")
+	if i := strings.LastIndex(name, ":"); i >= 0 {
+		name = name[i+1:]
+	}
+	if name == "" || name == "." {
+		name = "repo"
+	}
+	return name
+}
+
 func (p pickerModel) handleKey(key string) (tea.Model, tea.Cmd) {
+	if p.busy != "" {
+		return p, nil // cloning: ignore keys
+	}
+	if p.inputMode != 0 {
+		switch key {
+		case "esc":
+			p.inputMode = 0
+			p.input.Blur()
+			return p, nil
+		case "enter":
+			value := strings.TrimSpace(p.input.Value())
+			if value == "" {
+				return p, nil
+			}
+			mode := p.inputMode
+			p.inputMode = 0
+			p.input.Blur()
+			if mode == 1 { // clone
+				dest := filepath.Join(p.dir, repoNameFromURL(value))
+				p.busy = "⇣ cloning " + value + " …"
+				return p, func() tea.Msg {
+					if err := gitClone(value, dest); err != nil {
+						return cloneDoneMsg{err: err}
+					}
+					return cloneDoneMsg{path: dest}
+				}
+			}
+			// init
+			dest := filepath.Join(p.dir, value)
+			if err := gitInit(dest); err != nil {
+				p.errMsg = err.Error()
+				return p, nil
+			}
+			p.choice = dest
+			return p, tea.Quit
+		}
+		return p, nil
+	}
 	switch key {
 	case "q", "ctrl+c", "esc":
 		return p, tea.Quit
+	case "c":
+		p.mode = pickBrowse
+		p.inputMode = 1
+		p.input.Prompt = "⇣ clone url: "
+		p.input.Placeholder = "https://github.com/user/repo.git"
+		p.input.SetValue("")
+		p.input.Focus()
+		return p, textinput.Blink
+	case "i":
+		p.mode = pickBrowse
+		p.inputMode = 2
+		p.input.Prompt = "★ init repo: "
+		p.input.Placeholder = "new-project-name"
+		p.input.SetValue("")
+		p.input.Focus()
+		return p, textinput.Blink
 	case "tab":
 		if len(p.recent) > 0 {
 			if p.mode == pickRecent {
@@ -254,11 +345,18 @@ func (p pickerModel) View() string {
 	}
 
 	b.WriteString("\n")
-	hints := "↑↓/ws move · ⏎ open · ←→/ad up/into dir · tab recent/browse · ~ home · . open here · q quit"
-	if p.mode == pickRecent {
-		hints = "↑↓/ws move · ⏎ open · tab browse · q quit"
+	switch {
+	case p.busy != "":
+		b.WriteString(sStatusM.Render(" " + p.busy))
+	case p.inputMode != 0:
+		b.WriteString(" " + p.input.View() + "  " + sDim.Render("enter confirm · esc cancel"))
 	}
-	b.WriteString(sFooter.Width(p.width).Render(hints))
+	b.WriteString("\n")
+	hints := "↑↓ move · ⏎ open · ←→ dirs · tab recent/browse · c clone · i init · ~ home · . open here · q quit"
+	if p.mode == pickRecent {
+		hints = "↑↓ move · ⏎ open · tab browse · c clone · i init · q quit"
+	}
+	b.WriteString(sFooter.Width(p.width).MaxHeight(1).Render(hints))
 	return b.String()
 }
 

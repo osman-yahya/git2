@@ -21,6 +21,8 @@ If you launch git2 outside any repository, the picker opens instead of an error:
   marked `⎇ … git repo`; `enter` on a repo opens it, `enter` on a plain folder
   descends into it, `←`/`backspace` goes up, `~` jumps home, `.` opens the
   current location (useful when you're already inside a repo's subfolder).
+- **`c` clones** a URL into the folder you're browsing and opens it;
+  **`i` creates** a fresh repository there.
 
 `tab` switches between the two. The last browsed folder and the recent-repos
 list are cached, so next time the picker starts where you left off.
@@ -51,8 +53,9 @@ merges it into your branch, `y` cherry-picks it, `R` rebases your branch onto
 it, `v` reverts it, `n` creates a new branch starting at it. All of these
 confirm before running.
 
-`b` opens a branch-switch popup without leaving the graph, and `t` toggles
-**branch focus**: only the current branch's history instead of all branches.
+`b` opens a branch-switch popup without leaving the graph, `t` toggles
+**branch focus** (only the current branch's history), and `T` creates a tag on
+the selected commit — or, if it already has tags, offers create/delete.
 
 **Blocked switches**: if a checkout would clobber local changes, a popup opens
 instead of an error — choose *don't switch*, *stash → switch → re-apply*, or
@@ -72,11 +75,18 @@ everything staged and jumps to the graph so you see the new commit land.
 in your editor, press `space` to mark each resolved, then `c` — the commit
 message is prefilled with git's merge message. `X` aborts the merge instead.
 
+More working-tree tools: `D` discards a file's changes (confirmed —
+irreversible), `A` amends the last commit with the message prefilled, and `H`
+toggles the right pane between the file's diff and its **history** (every
+commit that touched it).
+
 ### ⎇ Branches
 Local and remote branches sorted by last activity, with ahead/behind tracking
 info. The right pane shows the selected branch's history. `enter` checks a
 branch out — for remote branches git2 switches to (or creates) the local
 tracking branch and says so explicitly. `n` creates a new branch from HEAD,
+`e` renames the selected branch, `x` deletes it (unmerged branches get a
+force-delete popup instead of a silent failure),
 `m` merges the selected branch into the current one after confirmation, and
 `O` opens the pull-request page for the selected branch in your browser
 (GitHub, GitLab and Bitbucket URLs are recognized).
@@ -113,6 +123,11 @@ Navigation works three ways — arrows, WASD, or vim keys — pick your habit:
 | `n` | new branch — from commit or HEAD |
 | `y` / `R` / `v` | cherry-pick · rebase onto · revert commit |
 | `X` | abort merge (status view) |
+| `D` | discard file changes (status view) |
+| `A` | amend last commit (status view) |
+| `H` | file history ↔ diff (status view) |
+| `T` | create / delete tag (commits view) |
+| `e` / `x` | rename / delete branch (branches view) |
 | `O` | open PR page in browser (branches view) |
 | `/` | search commits |
 | `space` | stage / unstage file |
@@ -128,6 +143,10 @@ Navigation works three ways — arrows, WASD, or vim keys — pick your habit:
 | `r` | refresh |
 | `?` | help overlay |
 | `q` / `ctrl+c` | quit |
+
+The line above the key hints is the **message line**: confirmations, prompts
+and results appear there (and clear after a few seconds), while the hints stay
+visible. When idle it shows details about the current selection.
 
 Mouse: click a row to select it, **double-click to act** (checkout a commit or
 branch, stage/unstage a file, apply a stash), click a tab to switch views,
