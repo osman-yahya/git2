@@ -47,8 +47,13 @@ var (
 			BorderForeground(cDim)
 
 	// panes
-	sPaneFocus = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent)
+	sPaneFocus = lipgloss.NewStyle().Border(lipgloss.ThickBorder()).BorderForeground(cAccent)
 	sPaneBlur  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cDim)
+
+	sConflictMark = lipgloss.NewStyle().Foreground(lipgloss.Color("#1a1b26")).
+			Background(cRed).Bold(true)
+	sHunkSel = lipgloss.NewStyle().Foreground(lipgloss.Color("#1a1b26")).
+			Background(cAccent).Bold(true)
 	sPaneTitle = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
 
 	// ref badges

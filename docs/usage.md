@@ -70,15 +70,31 @@ clean, noise-free diff; `space` (or double-click) stages/unstages, `c` commits
 everything staged and jumps to the graph so you see the new commit land.
 `enter` on a stash applies it; `x` drops it.
 
-**Merge conflicts**: when a merge stops on conflicts, the header shows
-`⚠ MERGING` and conflicted files appear in a red *Conflicts* section. Fix them
-in your editor, press `space` to mark each resolved, then `c` — the commit
-message is prefilled with git's merge message. `X` aborts the merge instead.
+**Merge conflicts — the resolve panel**: a conflicting merge (or cherry-pick,
+rebase, revert) jumps you straight to Status with a clear message; nothing is
+left in a broken state. Conflicted files sit in a red *Conflicts* section with
+the conflict markers highlighted in the diff. Per file you can:
+
+- `enter` — resolve popup: **use ours** (your branch), **use theirs**
+  (incoming), or **I fixed it in my editor — mark resolved**
+- `u` / `t` — one-key ours / theirs
+- `space` — mark resolved after editing by hand
+
+Then `c` commits the merge (message prefilled) or `X` aborts the whole thing.
+
+If a merge is blocked because you have **uncommitted changes**, git2 says so
+explicitly and offers: go commit/stash them yourself, or stash → merge →
+re-apply automatically.
 
 More working-tree tools: `D` discards a file's changes (confirmed —
-irreversible), `A` amends the last commit with the message prefilled, and `H`
-toggles the right pane between the file's diff and its **history** (every
-commit that touched it).
+irreversible), `A` amends the last commit with the message prefilled, `H`
+toggles the right pane between the file's diff and its **history**, and `B`
+toggles **blame**.
+
+**Hunk staging**: press `d` to focus the diff pane (its border turns thick and
+bright), then `[` / `]` select hunks — the active hunk header is highlighted —
+and `space` stages or unstages just that hunk. Perfect for splitting a messy
+file into clean commits.
 
 ### ⎇ Branches
 Local and remote branches sorted by last activity, with ahead/behind tracking
@@ -107,16 +123,22 @@ details.
 
 ## Controls
 
-Navigation works three ways — arrows, WASD, or vim keys — pick your habit:
+Navigation works three ways — arrows, WASD, or vim keys — pick your habit.
+The focused pane has a **thick bright border** with a `▶` in its title;
+`d` moves focus to the details pane, `a` brings it back to the list (arrow
+keys stay in the list so they never jump panes by surprise):
 
 | Key | Action |
 | --- | --- |
 | `↑ ↓` / `w s` / `j k` | move selection · scroll |
 | `tab` / `shift+tab` | next / previous view |
-| `← →` / `a d` / `h l` | switch pane focus |
+| `a` / `d` (or `h` / `l`) | focus the list ↔ the details pane |
 | `ctrl+d` `ctrl+u` / `pgdn` `pgup` | half-page jump |
 | `g` / `G` | top / bottom |
-| `enter` | focus the diff pane · checkout branch |
+| `enter` | focus diff · checkout branch · resolve conflict |
+| `u` / `t` | resolve conflict: ours / theirs (status view) |
+| `[` `]` + `space` | select & stage/unstage hunks (diff pane) |
+| `B` | blame ↔ diff (status view) |
 | `c` | checkout commit (commits view) |
 | `t` | branch focus ↔ all branches (commits view) |
 | `b` | switch-branch popup (commits view) |

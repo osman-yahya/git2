@@ -196,11 +196,15 @@ func (m model) renderFooter() string {
 		hints = []hint{{"c", "checkout"}, {"b", "branch"}, {"t", "focus"}, {"n", "new"}, {"T", "tag"},
 			{"m", "merge"}, {"y", "pick"}, {"R", "rebase"}, {"v", "revert"}, {"/", "search"}}
 	case viewStatus:
-		if m.head.Merging {
-			hints = []hint{{"space", "resolve"}, {"c", "commit merge"}, {"X", "abort merge"}, {"D", "discard"}}
-		} else {
+		switch {
+		case m.focus == focusRight:
+			hints = []hint{{"[ ]", "hunks"}, {"space", "stage hunk"}, {"↑↓", "scroll"}, {"a", "back to files"}}
+		case m.head.Merging:
+			hints = []hint{{"⏎", "resolve"}, {"u", "ours"}, {"t", "theirs"}, {"space", "mark ok"},
+				{"c", "commit merge"}, {"X", "abort"}}
+		default:
 			hints = []hint{{"space", "stage"}, {"D", "discard"}, {"c", "commit"}, {"A", "amend"},
-				{"S", "stash"}, {"H", "history"}}
+				{"S", "stash"}, {"H", "history"}, {"B", "blame"}}
 		}
 	case viewBranches:
 		hints = []hint{{"⏎", "checkout"}, {"n", "new"}, {"e", "rename"}, {"x", "delete"},
@@ -235,6 +239,9 @@ func (m model) pane(title, content string, width int, focused bool) string {
 	lines := strings.SplitN(box, "\n", 2)
 	if len(lines) == 2 {
 		t := " " + title + " "
+		if focused {
+			t = " ▶ " + title + " "
+		}
 		top := []rune(stripANSI(lines[0]))
 		if len(t)+4 < len(top) {
 			color := cDim
@@ -455,8 +462,43 @@ func (m model) renderStatusView() string {
 			diffTitle = "Diff · " + truncate(it.file.Path, rw-12)
 		}
 	}
-	right := m.pane(diffTitle, m.renderDiffLines(m.fileDiff, m.diffOff, rw-2), rw, m.focus == focusRight)
+	hunks := hunkRanges(m.fileDiff)
+	if len(hunks) > 0 && m.focus == focusRight {
+		diffTitle += fmt.Sprintf(" · hunk %d/%d", clamp(m.hunkSel, 0, len(hunks)-1)+1, len(hunks))
+	}
+	right := m.pane(diffTitle, m.renderStatusDiff(rw-2), rw, m.focus == focusRight)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+}
+
+// renderStatusDiff is renderDiffLines plus hunk-selection highlighting.
+func (m model) renderStatusDiff(width int) string {
+	lines := m.fileDiff
+	if len(lines) == 0 {
+		return sDim.Render("  nothing selected")
+	}
+	hunks := hunkRanges(lines)
+	selStart, selEnd := -1, -1
+	if len(hunks) > 0 {
+		hs := hunks[clamp(m.hunkSel, 0, len(hunks)-1)]
+		selStart, selEnd = hs[0], hs[1]
+	}
+	h := m.listHeight()
+	var b strings.Builder
+	rendered := 0
+	for i := m.diffOff; i < len(lines) && rendered < h; i++ {
+		if i == selStart && m.focus == focusRight {
+			b.WriteString(sHunkSel.Render(truncate(" "+lines[i]+" · space to stage/unstage ", width)))
+		} else if i > selStart && i < selEnd && m.focus == focusRight && strings.HasPrefix(lines[selStart], "@@") {
+			b.WriteString(styleDiffLine(lines[i], width))
+		} else {
+			b.WriteString(styleDiffLine(lines[i], width))
+		}
+		rendered++
+		if rendered < h {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 // stashLabel renders a stash description as a branch chip + clean message.
@@ -738,6 +780,9 @@ func (m model) renderDiffLines(lines []string, offset, width int) string {
 func styleDiffLine(line string, width int) string {
 	t := truncate(line, width)
 	switch {
+	case strings.HasPrefix(line, "<<<<<<<"), strings.HasPrefix(line, ">>>>>>>"),
+		strings.HasPrefix(line, "======="):
+		return sConflictMark.Render(t)
 	case strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "commit "),
 		strings.HasPrefix(line, "▸ "):
 		return sDiffHeader.Render(t)
@@ -798,6 +843,10 @@ func (m model) renderHelp() string {
 		{"b", "switch branch popup (commits view)"},
 		{"n", "new branch — from commit (commits) or HEAD (branches)"},
 		{"y / R / v", "cherry-pick · rebase onto · revert (commits view)"},
+		{"a / d", "focus files ↔ details pane (highlighted border)"},
+		{"⏎ / u / t", "resolve conflict: popup · ours · theirs (status)"},
+		{"[ ] + space", "select & stage/unstage single hunks (diff pane)"},
+		{"B", "blame file (status view)"},
 		{"D", "discard file changes (status view)"},
 		{"A", "amend last commit (status view)"},
 		{"H", "file history (status view, toggles with diff)"},

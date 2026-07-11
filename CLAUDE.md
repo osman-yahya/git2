@@ -41,8 +41,9 @@ gofmt -w . && go vet ./...
   `checkoutBlockedMsg`). All checkouts go through `m.doCheckout` so the popup logic
   stays centralized.
 - Key aliases everywhere: arrows / `w s a d` / `j k h l`. `s` means *down*, so it can't
-  be a mnemonic (stage = `space`, stash = `S`). `tab` cycles views (not panes!); panes
-  are `← → / a d / h l`. New keys must be added to the footer hints and the `?` help
+  be a mnemonic (stage = `space`, stash = `S`). `tab` cycles views (not panes!); pane
+  focus is ONLY `a d / h l` — arrows deliberately never switch panes (user request).
+  Focused pane renders with ThickBorder + ▶ in the title. New keys must be added to the footer hints and the `?` help
   overlay in views.go, plus docs/usage.md and README.
 - Flash messages via `m.setFlash()` only (auto-cleared by flashTick after ~4s); never
   assign m.flash directly.
@@ -50,6 +51,10 @@ gofmt -w . && go vet ./...
   then stashes) rendered through statusRows with section/directory headers at item==-1.
   Selection is item-indexed; scrolling is row-indexed via `itemRow`.
 - Force push is always `--force-with-lease`; pull is always `--ff-only`.
+- Merge-like ops (merge/rebase/cherry-pick/revert) go through `doMergeLike`, which
+  classifies failures: isConflictError → mergeConflictMsg (jump to Status resolve
+  panel), isDirtyTreeError → mergeBlockedMsg (commit-first/stash popup). git conflict
+  text arrives on STDOUT — `git()` merges stdout into error messages for this.
 - Machine-readable git output uses `%x1f` field / `%x1e` record separators.
 
 ## Testing (no real terminal available)

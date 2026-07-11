@@ -24,9 +24,12 @@ it offers your recent repos and a directory browser to pick one.
 - **Commit actions** — checkout, merge, cherry-pick, rebase, revert, branch right from the
   graph; blocked by local changes? A popup offers stash-and-reapply or discard. `b` switches
   branch in place, `t` focuses the graph on the current branch
-- **Status view** — file tree with clean per-file diffs, stage/unstage with `space` or
-  double-click, discard (`D`), amend (`A`), per-file history (`H`), stashes gathered at
-  the bottom, conflict resolution + merge abort/commit
+- **Status view** — file tree with clean per-file diffs, stage/unstage whole files or
+  **individual hunks**, discard (`D`), amend (`A`), per-file history (`H`) and blame (`B`),
+  stashes gathered at the bottom
+- **Conflict resolve panel** — a conflicting merge jumps straight to Status: per-file
+  *ours / theirs / fixed manually* popup, highlighted markers, commit-merge or abort;
+  merges blocked by uncommitted changes get a stash-and-retry popup
 - **Branches view** — local + remote branches with ahead/behind, checkout with `enter`,
   create/rename/delete (`n`/`e`/`x`), merge with `m`, open a pull-request page with `O`
 - **Tags** — create or delete tags right on the graph (`T`)
@@ -82,7 +85,7 @@ See the **[usage guide](docs/usage.md)** for the picker, views, and every keybin
 | --- | --- |
 | `↑ ↓` / `w s` / `j k` | move · scroll |
 | `tab` | next view |
-| `← →` / `a d` | switch pane |
+| `a` / `d` | focus list ↔ details pane |
 | `1` `2` `3` `4` | Commits · Status · Branches · Stashes |
 | `enter` | focus diff · checkout branch |
 | `c` / `y` / `R` / `v` | checkout · pick · rebase · revert commit |

@@ -38,7 +38,16 @@ func (r *Repo) git(args ...string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// merge/cherry-pick conflicts report on stdout, most errors on stderr —
+		// combine so callers can classify what actually happened
 		msg := strings.TrimSpace(stderr.String())
+		if out := strings.TrimSpace(stdout.String()); out != "" {
+			if msg != "" {
+				msg = out + "\n" + msg
+			} else {
+				msg = out
+			}
+		}
 		if msg == "" {
 			msg = err.Error()
 		}
@@ -860,4 +869,132 @@ func (r *Repo) TagsAt(hash string) []string {
 		}
 	}
 	return tags
+}
+
+// ---- v0.7: conflict resolution, hunks, blame ----
+
+// gitIn runs git with input piped to stdin (for apply).
+func (r *Repo) gitIn(stdin string, args ...string) (string, error) {
+	full := append([]string{"-C", r.Root, "-c", "color.ui=false"}, args...)
+	cmd := exec.Command("git", full...)
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", errors.New(msg)
+	}
+	return stdout.String(), nil
+}
+
+// isConflictError reports whether a merge-ish operation stopped on conflicts.
+func isConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "CONFLICT") || strings.Contains(s, "Automatic merge failed") ||
+		strings.Contains(s, "could not apply") || strings.Contains(s, "conflict")
+}
+
+// isDirtyTreeError reports git refusing an operation because of local changes.
+func isDirtyTreeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "would be overwritten by merge") ||
+		strings.Contains(s, "Please commit your changes or stash them") ||
+		strings.Contains(s, "cannot rebase: You have unstaged changes") ||
+		strings.Contains(s, "your index contains uncommitted changes")
+}
+
+// ResolveOurs / ResolveTheirs settle a conflicted file with one side and
+// mark it resolved.
+func (r *Repo) ResolveOurs(path string) error {
+	if _, err := r.git("checkout", "--ours", "--", path); err != nil {
+		return err
+	}
+	_, err := r.git("add", "--", path)
+	return err
+}
+
+func (r *Repo) ResolveTheirs(path string) error {
+	if _, err := r.git("checkout", "--theirs", "--", path); err != nil {
+		return err
+	}
+	_, err := r.git("add", "--", path)
+	return err
+}
+
+// rawHunks splits a raw git diff for one file into its file header and hunks.
+func rawHunks(raw string) (header string, hunks []string) {
+	lines := strings.Split(raw, "\n")
+	var head []string
+	var cur []string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "@@") {
+			if len(cur) > 0 {
+				hunks = append(hunks, strings.Join(cur, "\n")+"\n")
+			}
+			cur = []string{l}
+			continue
+		}
+		if len(cur) > 0 {
+			cur = append(cur, l)
+		} else {
+			head = append(head, l)
+		}
+	}
+	if len(cur) > 0 {
+		h := strings.Join(cur, "\n")
+		if !strings.HasSuffix(h, "\n") {
+			h += "\n"
+		}
+		hunks = append(hunks, h)
+	}
+	return strings.Join(head, "\n") + "\n", hunks
+}
+
+// StageHunk applies a single hunk of a file's diff to the index (stage) or
+// removes it from the index (unstage). idx is the hunk's position in the
+// current diff for that side.
+func (r *Repo) StageHunk(f FileStatus, idx int, unstage bool) error {
+	args := []string{"diff"}
+	if unstage {
+		args = append(args, "--cached")
+	}
+	args = append(args, "--", statusTarget(f.Path))
+	raw, err := r.git(args...)
+	if err != nil {
+		return err
+	}
+	header, hunks := rawHunks(raw)
+	if idx < 0 || idx >= len(hunks) {
+		return errors.New("hunk out of range — refresh and retry")
+	}
+	patch := header + hunks[idx]
+	applyArgs := []string{"apply", "--cached"}
+	if unstage {
+		applyArgs = append(applyArgs, "--reverse")
+	}
+	_, err = r.gitIn(patch, applyArgs...)
+	return err
+}
+
+// Blame returns an annotated view of a file at HEAD.
+func (r *Repo) Blame(path string) ([]string, error) {
+	out, err := r.git("blame", "--date=short", "--abbrev=7", "--", path)
+	if err != nil {
+		return nil, err
+	}
+	lines := []string{"blame of " + path, ""}
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		lines = append(lines, strings.ReplaceAll(l, "\t", "    "))
+	}
+	return lines, nil
 }

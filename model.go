@@ -77,6 +77,7 @@ type model struct {
 	fileDiff    []string
 	diffFor     string
 	diffOff     int
+	hunkSel     int
 
 	// branches view
 	branches []Branch
@@ -230,6 +231,17 @@ type autoFetchMsg struct{}
 type flashTickMsg struct{}
 type openTagPromptMsg struct{ hash string }
 type branchDeleteBlockedMsg struct{ name string }
+
+// mergeConflictMsg: a merge-like op stopped on conflicts → jump to Status.
+type mergeConflictMsg struct{ op string }
+
+// mergeBlockedMsg: a merge-like op refused because of uncommitted changes.
+type mergeBlockedMsg struct {
+	op      string
+	run     func(*Repo) error
+	success string
+}
+type jumpStatusMsg struct{ note string }
 type branchPopupMsg struct{ branches []Branch }
 
 type choiceOption struct {
@@ -488,18 +500,113 @@ func (m model) loadFileHistory(f FileStatus) tea.Cmd {
 	}
 }
 
-// checkoutSelectedCommit prefers a local branch pointing at the commit.
-func (m model) checkoutSelectedCommit() tea.Cmd {
+// openResolvePopup offers the three ways out of a conflicted file.
+func (m *model) openResolvePopup(f FileStatus) {
+	path := statusTarget(f.Path)
+	r := m.repo
+	m.choiceTitle = "Resolve conflict in " + path
+	m.choiceSel = 0
+	m.choiceOptions = []choiceOption{
+		{label: "Use OURS — keep " + m.head.Branch + "'s version", cmd: func() tea.Msg {
+			if err := r.ResolveOurs(path); err != nil {
+				return actionMsg{err: err}
+			}
+			return actionMsg{text: "✓ resolved " + path + " using ours", reload: true}
+		}},
+		{label: "Use THEIRS — take the incoming version", cmd: func() tea.Msg {
+			if err := r.ResolveTheirs(path); err != nil {
+				return actionMsg{err: err}
+			}
+			return actionMsg{text: "✓ resolved " + path + " using theirs", reload: true}
+		}},
+		{label: "I fixed it in my editor — mark resolved", cmd: func() tea.Msg {
+			if err := r.StageFile(f); err != nil {
+				return actionMsg{err: err}
+			}
+			return actionMsg{text: "✓ marked " + path + " resolved", reload: true}
+		}},
+		{label: "Cancel", cmd: nil},
+	}
+}
+
+// doMergeLike runs a merge/rebase/cherry-pick/revert and classifies failure:
+// conflicts jump to the Status resolve panel; a dirty tree opens a popup.
+func (m model) doMergeLike(op string, run func(*Repo) error, success string) tea.Cmd {
+	r := m.repo
+	return func() tea.Msg {
+		err := run(r)
+		if err == nil {
+			return actionMsg{text: success, reload: true}
+		}
+		if isDirtyTreeError(err) {
+			return mergeBlockedMsg{op: op, run: run, success: success}
+		}
+		if isConflictError(err) {
+			return mergeConflictMsg{op: op}
+		}
+		return actionMsg{err: err}
+	}
+}
+
+func (m model) loadBlame(f FileStatus) tea.Cmd {
+	r := m.repo
+	path := statusTarget(f.Path)
+	return func() tea.Msg {
+		lines, err := r.Blame(path)
+		return fileDiffMsg{"blame:" + path, lines, err}
+	}
+}
+
+// hunkRanges finds the row spans of each hunk in a cleaned diff.
+func hunkRanges(lines []string) [][2]int {
+	var ranges [][2]int
+	start := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "@@ line") {
+			if start >= 0 {
+				ranges = append(ranges, [2]int{start, i})
+			}
+			start = i
+		} else if strings.HasPrefix(l, "▸ ") && start >= 0 {
+			ranges = append(ranges, [2]int{start, i})
+			start = -1
+		}
+	}
+	if start >= 0 {
+		ranges = append(ranges, [2]int{start, len(lines)})
+	}
+	return ranges
+}
+
+// checkoutSelectedCommit checks out the commit: a single local branch is
+// taken directly; several branches on the same node open a picker popup.
+func (m *model) checkoutSelectedCommit() tea.Cmd {
 	c, ok := m.selectedCommit()
 	if !ok {
 		return nil
 	}
+	var branches []string
 	for _, ref := range c.Refs {
 		if ref.Kind == RefBranch || (ref.Kind == RefHead && ref.Name != "HEAD") {
-			return m.doCheckout(ref.Name, ref.Name, false)
+			branches = append(branches, ref.Name)
 		}
 	}
-	return m.doCheckout(c.Hash, c.ShortHash(), true)
+	switch len(branches) {
+	case 0:
+		return m.doCheckout(c.Hash, c.ShortHash(), true)
+	case 1:
+		return m.doCheckout(branches[0], branches[0], false)
+	}
+	var opts []choiceOption
+	for _, b := range branches {
+		name := b
+		opts = append(opts, choiceOption{label: "⎇ " + name, cmd: m.doCheckout(name, name, false)})
+	}
+	opts = append(opts, choiceOption{label: "● detached at " + c.ShortHash(), cmd: m.doCheckout(c.Hash, c.ShortHash(), true)})
+	m.choiceTitle = "Several branches point here — check out which?"
+	m.choiceOptions = opts
+	m.choiceSel = 0
+	return nil
 }
 
 // doCheckout tries to switch to a branch or commit; when git refuses because
@@ -715,10 +822,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.statusItems) > 0 && m.fileSel < len(m.statusItems) {
 			it := m.statusItems[m.fileSel]
 			match = itemKey(it) == msg.key ||
-				(!it.isStash && msg.key == "hist:"+statusTarget(it.file.Path))
+				(!it.isStash && (msg.key == "hist:"+statusTarget(it.file.Path) ||
+					msg.key == "blame:"+statusTarget(it.file.Path)))
 		}
 		if match {
 			m.fileDiff, m.diffFor, m.diffOff = msg.lines, msg.key, 0
+			m.hunkSel = 0
 		}
 		return m, nil
 
@@ -831,6 +940,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flash = ""
 		}
 		return m, flashTick()
+
+	case mergeConflictMsg:
+		m.view = viewStatus
+		m.focus = focusLeft
+		m.setFlash("⚠ "+msg.op+" stopped on conflicts — ⏎ on a file to resolve, or X to abort", true)
+		return m, tea.Batch(m.loadStatus(), m.loadStashes(), m.loadHead())
+
+	case jumpStatusMsg:
+		m.view = viewStatus
+		m.focus = focusLeft
+		m.setFlash(msg.note, false)
+		return m, tea.Batch(m.loadStatus(), m.loadStashes(), m.loadHead())
+
+	case mergeBlockedMsg:
+		op, run, success := msg.op, msg.run, msg.success
+		r := m.repo
+		m.choiceTitle = "You have uncommitted changes — " + op + " needs a clean tree"
+		m.choiceSel = 0
+		m.choiceOptions = []choiceOption{
+			{label: "Go to Status and commit/stash them myself", cmd: func() tea.Msg {
+				return jumpStatusMsg{note: "commit (c) or stash (S) your changes, then retry " + op}
+			}},
+			{label: "Stash changes, " + op + ", re-apply them", cmd: func() tea.Msg {
+				if err := r.StashPush("git2: auto-stash before " + op); err != nil {
+					return actionMsg{err: err}
+				}
+				if err := run(r); err != nil {
+					if isConflictError(err) {
+						return mergeConflictMsg{op: op + " (your changes stay stashed)"}
+					}
+					_ = r.StashPop("stash@{0}")
+					return actionMsg{err: err}
+				}
+				if err := r.StashPop("stash@{0}"); err != nil {
+					return actionMsg{text: success + " · stash re-apply conflicted — stash kept", reload: true}
+				}
+				return actionMsg{text: success + " · changes re-applied", reload: true}
+			}},
+			{label: "Cancel", cmd: nil},
+		}
+		return m, nil
 
 	case branchDeleteBlockedMsg:
 		name := msg.name
@@ -1141,12 +1291,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.switchView((m.view + 1) % 4)
 	case "shift+tab":
 		return m.switchView((m.view + 3) % 4)
-	case "left", "right", "h", "l", "a", "d":
-		if key == "left" || key == "h" || key == "a" {
-			m.focus = focusLeft
-		} else {
-			m.focus = focusRight
-		}
+	case "h", "a":
+		m.focus = focusLeft
+		return m, nil
+	case "l", "d":
+		m.focus = focusRight
 		return m, nil
 	}
 
@@ -1314,7 +1463,8 @@ func (m model) handleCommitsKey(key string) (tea.Model, tea.Cmd) {
 		m.focus = focusRight
 		return m, nil
 	case "c":
-		return m, m.checkoutSelectedCommit()
+		cmd := m.checkoutSelectedCommit()
+		return m, cmd
 	case "t":
 		m.allRefs = !m.allRefs
 		if m.allRefs {
@@ -1363,60 +1513,40 @@ func (m model) handleCommitsKey(key string) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		r := m.repo
 		hash := c.Hash
 		m.confirmMsg = "Merge " + c.ShortHash() + " into " + m.head.Branch + "? y/N"
-		m.confirmCmd = func() tea.Msg {
-			if err := r.Merge(hash); err != nil {
-				return actionMsg{err: err}
-			}
-			return actionMsg{text: "✓ merged " + hash[:8] + " into " + m.head.Branch, reload: true}
-		}
+		m.confirmCmd = m.doMergeLike("merge", func(r *Repo) error { return r.Merge(hash) },
+			"✓ merged "+hash[:8]+" into "+m.head.Branch)
 		return m, nil
 	case "y":
 		c, ok := m.selectedCommit()
 		if !ok {
 			return m, nil
 		}
-		r := m.repo
 		hash := c.Hash
 		m.confirmMsg = "Cherry-pick " + c.ShortHash() + " onto " + m.head.Branch + "? y/N"
-		m.confirmCmd = func() tea.Msg {
-			if err := r.CherryPick(hash); err != nil {
-				return actionMsg{err: err}
-			}
-			return actionMsg{text: "✓ cherry-picked " + hash[:8] + " onto " + m.head.Branch, reload: true}
-		}
+		m.confirmCmd = m.doMergeLike("cherry-pick", func(r *Repo) error { return r.CherryPick(hash) },
+			"✓ cherry-picked "+hash[:8]+" onto "+m.head.Branch)
 		return m, nil
 	case "R":
 		c, ok := m.selectedCommit()
 		if !ok {
 			return m, nil
 		}
-		r := m.repo
 		hash := c.Hash
 		m.confirmMsg = "Rebase " + m.head.Branch + " onto " + c.ShortHash() + "? y/N"
-		m.confirmCmd = func() tea.Msg {
-			if err := r.Rebase(hash); err != nil {
-				return actionMsg{err: err}
-			}
-			return actionMsg{text: "✓ rebased " + m.head.Branch + " onto " + hash[:8], reload: true}
-		}
+		m.confirmCmd = m.doMergeLike("rebase", func(r *Repo) error { return r.Rebase(hash) },
+			"✓ rebased "+m.head.Branch+" onto "+hash[:8])
 		return m, nil
 	case "v":
 		c, ok := m.selectedCommit()
 		if !ok {
 			return m, nil
 		}
-		r := m.repo
 		hash := c.Hash
 		m.confirmMsg = "Revert " + c.ShortHash() + " (creates a new commit)? y/N"
-		m.confirmCmd = func() tea.Msg {
-			if err := r.Revert(hash); err != nil {
-				return actionMsg{err: err}
-			}
-			return actionMsg{text: "✓ reverted " + hash[:8], reload: true}
-		}
+		m.confirmCmd = m.doMergeLike("revert", func(r *Repo) error { return r.Revert(hash) },
+			"✓ reverted "+hash[:8])
 		return m, nil
 	}
 	return m, nil
@@ -1426,12 +1556,13 @@ func (m model) handleStatusKey(key string) (tea.Model, tea.Cmd) {
 	page := m.listHeight()
 	if m.focus == focusRight {
 		maxOff := max(len(m.fileDiff)-m.listHeight(), 0)
+		hunks := hunkRanges(m.fileDiff)
 		switch key {
 		case "j", "s", "down":
 			m.diffOff = min(m.diffOff+1, maxOff)
 		case "k", "w", "up":
 			m.diffOff = max(m.diffOff-1, 0)
-		case "ctrl+d", "pgdown", " ":
+		case "ctrl+d", "pgdown":
 			m.diffOff = min(m.diffOff+page/2, maxOff)
 		case "ctrl+u", "pgup":
 			m.diffOff = max(m.diffOff-page/2, 0)
@@ -1439,6 +1570,39 @@ func (m model) handleStatusKey(key string) (tea.Model, tea.Cmd) {
 			m.diffOff = 0
 		case "G", "end":
 			m.diffOff = maxOff
+		case "]":
+			if len(hunks) > 0 {
+				m.hunkSel = clamp(m.hunkSel+1, 0, len(hunks)-1)
+				m.diffOff = min(hunks[m.hunkSel][0], maxOff)
+			}
+		case "[":
+			if len(hunks) > 0 {
+				m.hunkSel = clamp(m.hunkSel-1, 0, len(hunks)-1)
+				m.diffOff = min(hunks[m.hunkSel][0], maxOff)
+			}
+		case " ":
+			// stage / unstage just the selected hunk
+			if len(m.statusItems) == 0 || m.fileSel >= len(m.statusItems) {
+				return m, nil
+			}
+			it := m.statusItems[m.fileSel]
+			if it.isStash || it.file.Untracked || it.file.Conflict || len(hunks) == 0 {
+				m.setFlash("hunk staging works on modified tracked files", false)
+				return m, nil
+			}
+			f := it.file
+			idx := clamp(m.hunkSel, 0, len(hunks)-1)
+			r := m.repo
+			return m, func() tea.Msg {
+				if err := r.StageHunk(f, idx, f.Staged); err != nil {
+					return actionMsg{err: err}
+				}
+				verb := "staged"
+				if f.Staged {
+					verb = "unstaged"
+				}
+				return actionMsg{text: fmt.Sprintf("✓ %s hunk %d of %s", verb, idx+1, f.Path), reload: true}
+			}
 		case "esc":
 			m.focus = focusLeft
 		}
@@ -1482,8 +1646,48 @@ func (m model) handleStatusKey(key string) (tea.Model, tea.Cmd) {
 				return actionMsg{text: "✓ applied " + ref, reload: true}
 			}
 		}
+		if it.file.Conflict {
+			m.openResolvePopup(it.file)
+			return m, nil
+		}
 		m.focus = focusRight
 		return m, nil
+	case "u", "t":
+		if len(m.statusItems) == 0 {
+			return m, nil
+		}
+		it := m.statusItems[m.fileSel]
+		if it.isStash || !it.file.Conflict {
+			return m, nil
+		}
+		path := statusTarget(it.file.Path)
+		r := m.repo
+		ours := key == "u"
+		return m, func() tea.Msg {
+			var err error
+			var side string
+			if ours {
+				err, side = r.ResolveOurs(path), "ours (current branch)"
+			} else {
+				err, side = r.ResolveTheirs(path), "theirs (incoming)"
+			}
+			if err != nil {
+				return actionMsg{err: err}
+			}
+			return actionMsg{text: "✓ resolved " + path + " using " + side, reload: true}
+		}
+	case "B":
+		if len(m.statusItems) == 0 {
+			return m, nil
+		}
+		it := m.statusItems[m.fileSel]
+		if it.isStash {
+			return m, nil
+		}
+		if strings.HasPrefix(m.diffFor, "blame:") {
+			return m, m.loadItemDiff(it)
+		}
+		return m, m.loadBlame(it.file)
 	case "x":
 		if len(m.statusItems) == 0 {
 			return m, nil
@@ -1704,15 +1908,10 @@ func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 			m.setFlash("cannot merge a branch into itself", true)
 			return m, nil
 		}
-		r := m.repo
 		name := b.Name
 		m.confirmMsg = "Merge " + name + " into " + m.head.Branch + "? y/N"
-		m.confirmCmd = func() tea.Msg {
-			if err := r.Merge(name); err != nil {
-				return actionMsg{err: err}
-			}
-			return actionMsg{text: "✓ merged " + name + " into " + m.head.Branch, reload: true}
-		}
+		m.confirmCmd = m.doMergeLike("merge", func(r *Repo) error { return r.Merge(name) },
+			"✓ merged "+name+" into "+m.head.Branch)
 		return m, nil
 	}
 	return m, nil
@@ -1770,7 +1969,8 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if double && target == m.sel {
-				return m, m.checkoutSelectedCommit()
+				cmd := m.checkoutSelectedCommit()
+				return m, cmd
 			}
 			return m.moveSel(target - m.sel)
 		case viewStatus:
