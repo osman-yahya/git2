@@ -224,17 +224,22 @@ func (m model) renderFooter() string {
 // ---- panes ----
 
 func (m model) pane(title, content string, width int, focused bool) string {
+	return m.paneH(title, content, width, m.bodyHeight(), focused)
+}
+
+// paneH renders a bordered pane with an explicit total height.
+func (m model) paneH(title, content string, width, height int, focused bool) string {
 	style := sPaneBlur
 	if focused {
 		style = sPaneFocus
 	}
 	inner := lipgloss.NewStyle().
 		Width(width - 2).
-		Height(m.bodyHeight() - 2).
+		Height(height - 2).
 		MaxWidth(width - 2).
-		MaxHeight(m.bodyHeight() - 2).
+		MaxHeight(height - 2).
 		Render(content)
-	box := style.Width(width - 2).Height(m.bodyHeight() - 2).Render(inner)
+	box := style.Width(width - 2).Height(height - 2).Render(inner)
 	// stamp the title into the top border
 	lines := strings.SplitN(box, "\n", 2)
 	if len(lines) == 2 {
@@ -270,11 +275,30 @@ func (m model) renderCommitsView() string {
 	}
 	left := m.pane(title, m.renderCommitList(lw-2), lw, m.focus == focusLeft)
 
-	detailTitle := "Details"
+	metaTitle := "Details"
 	if c, ok := m.selectedCommit(); ok {
-		detailTitle = "Details · " + c.ShortHash()
+		metaTitle = "Details · " + c.ShortHash()
 	}
-	right := m.pane(detailTitle, m.renderDiffLines(m.details, m.detailOff, rw-2), rw, m.focus == focusRight)
+	metaH := m.detailMetaHeight()
+	var metaBody strings.Builder
+	for i, l := range m.detailMeta {
+		if i >= metaH-2 {
+			break
+		}
+		switch {
+		case strings.HasPrefix(l, "commit "), strings.HasPrefix(l, "parents"):
+			metaBody.WriteString(sDim.Render(truncate(l, rw-4)))
+		case strings.HasPrefix(l, "author "), strings.HasPrefix(l, "date "):
+			metaBody.WriteString(sText.Render(truncate(l, rw-4)))
+		default:
+			metaBody.WriteString(sBright.Render(truncate(l, rw-4)))
+		}
+		metaBody.WriteString("\n")
+	}
+	metaPane := m.paneH(metaTitle, strings.TrimRight(metaBody.String(), "\n"), rw, metaH, false)
+	patchPane := m.paneH("Changes", m.renderDiffLines(m.details, m.detailOff, rw-2), rw,
+		m.bodyHeight()-metaH, m.focus == focusRight)
+	right := lipgloss.JoinVertical(lipgloss.Left, metaPane, patchPane)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
@@ -536,15 +560,20 @@ func (m model) renderStatusList(width int) string {
 	for i := m.fileOffset; i < len(m.statusRows) && rendered < h; i++ {
 		row := m.statusRows[i]
 		if row.item < 0 {
-			// section or directory header
-			style := sPaneTitle
+			// section or directory header: full-width band
+			style := sSectionBand.Foreground(cAccent)
 			if strings.HasPrefix(row.text, "   ▾") {
 				style = sDim
+			} else if strings.HasPrefix(row.text, "✗") {
+				style = sSectionBand.Foreground(cRed)
+			} else if strings.HasPrefix(row.text, "≡") {
+				style = sSectionBand.Foreground(cMagenta)
 			}
-			if strings.HasPrefix(row.text, "✗") {
-				style = sErr
+			if strings.HasPrefix(row.text, "   ▾") {
+				b.WriteString(style.Render(truncate(row.text, width)))
+			} else {
+				b.WriteString(style.Width(width).Render(truncate(row.text, width)))
 			}
-			b.WriteString(style.Render(truncate(row.text, width)))
 		} else {
 			it := m.statusItems[row.item]
 			selected := row.item == m.fileSel
@@ -759,6 +788,9 @@ func (m model) renderDiffLines(lines []string, offset, width int) string {
 		return sDim.Render("  nothing selected")
 	}
 	h := m.listHeight()
+	if m.view == viewCommits {
+		h = m.bodyHeight() - m.detailMetaHeight() - 2
+	}
 	var b strings.Builder
 	rendered := 0
 	for i := offset; i < len(lines) && rendered < h; i++ {
@@ -782,18 +814,18 @@ func styleDiffLine(line string, width int) string {
 	switch {
 	case strings.HasPrefix(line, "<<<<<<<"), strings.HasPrefix(line, ">>>>>>>"),
 		strings.HasPrefix(line, "======="):
-		return sConflictMark.Render(t)
+		return sConflictMark.Width(width).Render(t)
 	case strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "commit "),
 		strings.HasPrefix(line, "▸ "):
-		return sDiffHeader.Render(t)
+		return sDiffHeader.Width(width).Render(t)
 	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
 		return sDiffMeta.Render(t)
 	case strings.HasPrefix(line, "@@"):
-		return sDiffHunk.Render(t)
+		return sDiffHunk.Width(width).Render(t)
 	case strings.HasPrefix(line, "+"):
-		return sDiffAdd.Render(t)
+		return sDiffAdd.Width(width).Render(t)
 	case strings.HasPrefix(line, "-"):
-		return sDiffDel.Render(t)
+		return sDiffDel.Width(width).Render(t)
 	case strings.HasPrefix(line, "author "), strings.HasPrefix(line, "date   "):
 		return sDim.Render(t)
 	case strings.Contains(line, " | ") && (strings.Contains(line, "+") || strings.Contains(line, "-")):
@@ -814,17 +846,17 @@ func styleDiffLine(line string, width int) string {
 
 func (m model) renderChoice() string {
 	var b strings.Builder
-	b.WriteString(sBright.Render(m.choiceTitle) + "\n\n")
+	b.WriteString(sPopupTitle.Render(" "+m.choiceTitle+" ") + "\n\n")
 	for i, opt := range m.choiceOptions {
-		marker, style := "  ", sText
+		marker, style := "  ", sText.Background(cBarBg)
 		if i == m.choiceSel {
 			marker, style = "▸ ", sBright.Background(cSelBg)
 		}
 		b.WriteString(fmt.Sprintf("%s%s %s\n", marker,
-			sHelpKey.Render(fmt.Sprintf("%d", i+1)), style.Render(opt.label)))
+			sHelpKey.Background(cBarBg).Render(fmt.Sprintf("%d", i+1)), style.Render(" "+opt.label+" ")))
 	}
-	b.WriteString("\n" + sDim.Render("↑↓ choose · ⏎ confirm · esc cancel"))
-	return sHelpBox.Render(strings.TrimRight(b.String(), "\n"))
+	b.WriteString("\n" + sDim.Background(cBarBg).Render("↑↓ or click · ⏎ confirm · esc cancel"))
+	return sPopup.Render(strings.TrimRight(b.String(), "\n"))
 }
 
 // ---- help overlay ----

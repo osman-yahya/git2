@@ -57,7 +57,8 @@ type model struct {
 	visible    []int // indices into commits (filtered by search)
 	sel        int   // index into visible
 	offset     int
-	details    []string
+	details    []string // patch lines (bottom pane)
+	detailMeta []string // metadata lines (top pane)
 	detailFor  string
 	detailOff  int
 	loadingLog bool
@@ -186,7 +187,8 @@ type commitsMsg struct {
 }
 type detailsMsg struct {
 	hash  string
-	lines []string
+	meta  []string
+	patch []string
 	err   error
 }
 type statusListMsg struct {
@@ -255,6 +257,7 @@ type checkoutBlockedMsg struct {
 	target   string
 	desc     string // human name shown in the popup
 	isCommit bool
+	isRemote bool
 }
 
 // ---- commands ----
@@ -271,8 +274,8 @@ func (m model) loadCommits() tea.Cmd {
 func (m model) loadDetails(hash string) tea.Cmd {
 	r := m.repo
 	return func() tea.Msg {
-		lines, err := r.CommitDetails(hash)
-		return detailsMsg{hash, lines, err}
+		meta, patch, err := r.CommitDetails(hash)
+		return detailsMsg{hash, meta, patch, err}
 	}
 }
 
@@ -593,16 +596,16 @@ func (m *model) checkoutSelectedCommit() tea.Cmd {
 	}
 	switch len(branches) {
 	case 0:
-		return m.doCheckout(c.Hash, c.ShortHash(), true)
+		return m.doCheckout(c.Hash, c.ShortHash(), true, false)
 	case 1:
-		return m.doCheckout(branches[0], branches[0], false)
+		return m.doCheckout(branches[0], branches[0], false, false)
 	}
 	var opts []choiceOption
 	for _, b := range branches {
 		name := b
-		opts = append(opts, choiceOption{label: "⎇ " + name, cmd: m.doCheckout(name, name, false)})
+		opts = append(opts, choiceOption{label: "⎇ " + name, cmd: m.doCheckout(name, name, false, false)})
 	}
-	opts = append(opts, choiceOption{label: "● detached at " + c.ShortHash(), cmd: m.doCheckout(c.Hash, c.ShortHash(), true)})
+	opts = append(opts, choiceOption{label: "● detached at " + c.ShortHash(), cmd: m.doCheckout(c.Hash, c.ShortHash(), true, false)})
 	m.choiceTitle = "Several branches point here — check out which?"
 	m.choiceOptions = opts
 	m.choiceSel = 0
@@ -611,7 +614,7 @@ func (m *model) checkoutSelectedCommit() tea.Cmd {
 
 // doCheckout tries to switch to a branch or commit; when git refuses because
 // of local changes it opens the cancel/stash/discard popup instead of failing.
-func (m model) doCheckout(target, desc string, isCommit bool) tea.Cmd {
+func (m model) doCheckout(target, desc string, isCommit, isRemote bool) tea.Cmd {
 	r := m.repo
 	return func() tea.Msg {
 		var text string
@@ -619,10 +622,10 @@ func (m model) doCheckout(target, desc string, isCommit bool) tea.Cmd {
 		if isCommit {
 			text, err = r.CheckoutCommit(target)
 		} else {
-			text, err = r.CheckoutBranch(target)
+			text, err = r.CheckoutBranch(target, isRemote)
 		}
 		if isBlockedCheckout(err) {
-			return checkoutBlockedMsg{target: target, desc: desc, isCommit: isCommit}
+			return checkoutBlockedMsg{target: target, desc: desc, isCommit: isCommit, isRemote: isRemote}
 		}
 		if err != nil {
 			return actionMsg{err: err}
@@ -631,7 +634,7 @@ func (m model) doCheckout(target, desc string, isCommit bool) tea.Cmd {
 	}
 }
 
-func (m model) stashSwitchReapply(target string, isCommit bool) tea.Cmd {
+func (m model) stashSwitchReapply(target string, isCommit, isRemote bool) tea.Cmd {
 	r := m.repo
 	return func() tea.Msg {
 		if err := r.StashPush("git2: auto-stash before switching"); err != nil {
@@ -642,7 +645,7 @@ func (m model) stashSwitchReapply(target string, isCommit bool) tea.Cmd {
 		if isCommit {
 			text, err = r.CheckoutCommit(target)
 		} else {
-			text, err = r.CheckoutBranch(target)
+			text, err = r.CheckoutBranch(target, isRemote)
 		}
 		if err != nil {
 			_ = r.StashPop("stash@{0}") // roll the stash back where we started
@@ -655,7 +658,7 @@ func (m model) stashSwitchReapply(target string, isCommit bool) tea.Cmd {
 	}
 }
 
-func (m model) discardSwitch(target string, isCommit bool) tea.Cmd {
+func (m model) discardSwitch(target string, isCommit, isRemote bool) tea.Cmd {
 	r := m.repo
 	return func() tea.Msg {
 		if err := r.DiscardAll(); err != nil {
@@ -666,7 +669,7 @@ func (m model) discardSwitch(target string, isCommit bool) tea.Cmd {
 		if isCommit {
 			text, err = r.CheckoutCommit(target)
 		} else {
-			text, err = r.CheckoutBranch(target)
+			text, err = r.CheckoutBranch(target, isRemote)
 		}
 		if err != nil {
 			return actionMsg{err: err}
@@ -695,6 +698,11 @@ func (m model) bodyHeight() int { return max(m.height-5, 1) }
 
 // listHeight is the number of content rows inside a bordered pane.
 func (m model) listHeight() int { return max(m.bodyHeight()-2, 1) }
+
+// detailMetaHeight is the commits view's top-right metadata pane height.
+func (m model) detailMetaHeight() int {
+	return clamp(len(m.detailMeta)+2, 5, max(m.bodyHeight()/2, 5))
+}
 
 func (m model) leftWidth() int {
 	w := m.width * 11 / 20
@@ -795,7 +803,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if c, ok := m.selectedCommit(); ok && c.Hash == msg.hash {
-			m.details, m.detailFor, m.detailOff = msg.lines, msg.hash, 0
+			m.details, m.detailMeta, m.detailFor, m.detailOff = msg.patch, msg.meta, msg.hash, 0
 		}
 		return m, nil
 
@@ -914,8 +922,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.choiceSel = 0
 		m.choiceOptions = []choiceOption{
 			{label: "Don't switch — keep working here", cmd: nil},
-			{label: "Stash changes, switch, re-apply them", cmd: m.stashSwitchReapply(msg.target, msg.isCommit)},
-			{label: "Discard changes and switch  ⚠ irreversible", cmd: m.discardSwitch(msg.target, msg.isCommit)},
+			{label: "Stash changes, switch, re-apply them", cmd: m.stashSwitchReapply(msg.target, msg.isCommit, msg.isRemote)},
+			{label: "Discard changes and switch  ⚠ irreversible", cmd: m.discardSwitch(msg.target, msg.isCommit, msg.isRemote)},
 		}
 		return m, nil
 
@@ -1013,7 +1021,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			name := b.Name
-			opts = append(opts, choiceOption{label: "⎇ " + name, cmd: m.doCheckout(name, name, false)})
+			opts = append(opts, choiceOption{label: "⎇ " + name, cmd: m.doCheckout(name, name, false, false)})
 		}
 		if len(opts) == 0 {
 			m.setFlash("no local branches", false)
@@ -1416,7 +1424,8 @@ func (m model) moveSel(delta int) (tea.Model, tea.Cmd) {
 func (m model) handleCommitsKey(key string) (tea.Model, tea.Cmd) {
 	page := m.listHeight()
 	if m.focus == focusRight {
-		maxOff := max(len(m.details)-m.listHeight(), 0)
+		patchRows := max(m.bodyHeight()-m.detailMetaHeight()-2, 1)
+		maxOff := max(len(m.details)-patchRows, 0)
 		switch key {
 		case "j", "s", "down":
 			m.detailOff = min(m.detailOff+1, maxOff)
@@ -1833,7 +1842,7 @@ func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 			m.setFlash("already on "+b.Name, false)
 			return m, nil
 		}
-		return m, m.doCheckout(b.Name, b.Name, false)
+		return m, m.doCheckout(b.Name, b.Name, false, b.Remote)
 	case "n":
 		m.branchBase = ""
 		return m, m.openPrompt(promptBranch, "⎇ ", "new branch name (from "+m.head.Branch+")")
@@ -1918,6 +1927,37 @@ func (m model) handleBranchesKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// choice popup grabs the mouse: wheel moves, click chooses, outside cancels
+	if len(m.choiceOptions) > 0 {
+		switch {
+		case msg.Button == tea.MouseButtonWheelUp:
+			m.choiceSel = (m.choiceSel + len(m.choiceOptions) - 1) % len(m.choiceOptions)
+			return m, nil
+		case msg.Button == tea.MouseButtonWheelDown:
+			m.choiceSel = (m.choiceSel + 1) % len(m.choiceOptions)
+			return m, nil
+		case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
+			n := len(m.choiceOptions)
+			popupH := n + 8
+			top := 3 + max((m.bodyHeight()-popupH)/2, 0)
+			first := top + 4
+			if msg.Y >= first && msg.Y < first+n {
+				m.choiceSel = msg.Y - first
+				cmd := m.choiceOptions[m.choiceSel].cmd
+				m.choiceTitle, m.choiceOptions = "", nil
+				if cmd == nil {
+					m.setFlash("cancelled", false)
+				}
+				return m, cmd
+			}
+			if msg.Y < top || msg.Y >= top+popupH {
+				m.choiceTitle, m.choiceOptions = "", nil
+				m.setFlash("cancelled", false)
+			}
+			return m, nil
+		}
+		return m, nil
+	}
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
 		if m.mouseInRight(msg.X) {
@@ -2009,7 +2049,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					m.setFlash("already on "+b.Name, false)
 					return m, nil
 				}
-				return m, m.doCheckout(b.Name, b.Name, false)
+				return m, m.doCheckout(b.Name, b.Name, false, b.Remote)
 			}
 			m.brSel = target
 			b := m.branches[m.brSel]
@@ -2077,7 +2117,8 @@ func (m model) scrollLeft(delta int) (tea.Model, tea.Cmd) {
 func (m model) scrollRight(delta int) (tea.Model, tea.Cmd) {
 	switch m.view {
 	case viewCommits:
-		m.detailOff = clamp(m.detailOff+delta, 0, max(len(m.details)-m.listHeight(), 0))
+		patchRows := max(m.bodyHeight()-m.detailMetaHeight()-2, 1)
+		m.detailOff = clamp(m.detailOff+delta, 0, max(len(m.details)-patchRows, 0))
 	case viewStatus:
 		m.diffOff = clamp(m.diffOff+delta, 0, max(len(m.fileDiff)-m.listHeight(), 0))
 	case viewBranches:

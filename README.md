@@ -20,7 +20,8 @@ it offers your recent repos and a directory browser to pick one.
 ## Features
 
 - **Commit graph** — colored branch lanes with rounded connectors, ref badges for HEAD,
-  branches, remotes and tags, live search (`/`), full colorized patch in the details pane
+  branches, remotes and tags (slash names like `dev/main` handled correctly), live search
+  (`/`); the right column splits into a metadata card and a tinted-background diff pane
 - **Commit actions** — checkout, merge, cherry-pick, rebase, revert, branch right from the
   graph; blocked by local changes? A popup offers stash-and-reapply or discard. `b` switches
   branch in place, `t` focuses the graph on the current branch
@@ -40,7 +41,8 @@ it offers your recent repos and a directory browser to pick one.
 - **Repo picker** — launched outside a repo? Choose from recent repos, browse the
   filesystem, clone a URL (`c`) or init a new repo (`i`); the last location is remembered
 - **Controls that fit your hands** — arrows, WASD, or vim keys; full mouse support
-  (click rows/tabs, scroll wheel); adapts to light and dark terminals
+  (click rows/tabs, clickable popups, double-click actions, scroll wheel); GUI-style
+  theme with filled tabs, section bands and tinted diffs; light & dark terminals
 
 ## Install
 

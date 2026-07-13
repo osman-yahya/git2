@@ -38,11 +38,12 @@ var (
 	sFooter     = lipgloss.NewStyle().Background(cBarBg).Foreground(cDim).Padding(0, 1)
 	sFooterKey  = lipgloss.NewStyle().Background(cBarBg).Foreground(cBright).Bold(true)
 
-	// tabs
-	sTabActive = lipgloss.NewStyle().Foreground(cBright).Bold(true).
-			Padding(0, 2).Border(lipgloss.Border{Bottom: "─"}, false, false, true, false).
+	// tabs: active tab is a filled "button"
+	sTabActive = lipgloss.NewStyle().Foreground(lipgloss.Color("#1a1b26")).
+			Background(cAccent).Bold(true).
+			Padding(0, 2).Border(lipgloss.Border{Bottom: "▔"}, false, false, true, false).
 			BorderForeground(cAccent)
-	sTabIdle = lipgloss.NewStyle().Foreground(cDim).Padding(0, 2).
+	sTabIdle = lipgloss.NewStyle().Foreground(cDim).Background(cBarBg).Padding(0, 2).
 			Border(lipgloss.Border{Bottom: "─"}, false, false, true, false).
 			BorderForeground(cDim)
 
@@ -66,12 +67,24 @@ var (
 	sRefTag = lipgloss.NewStyle().Background(lipgloss.Color("#e0af68")).
 		Foreground(lipgloss.Color("#1a1b26")).Bold(true).Padding(0, 1)
 
-	// diff colors
-	sDiffAdd    = lipgloss.NewStyle().Foreground(cGreen)
-	sDiffDel    = lipgloss.NewStyle().Foreground(cRed)
-	sDiffHunk   = lipgloss.NewStyle().Foreground(cCyan).Bold(true)
-	sDiffHeader = lipgloss.NewStyle().Foreground(cMagenta).Bold(true)
+	// diff colors: GUI-style tinted line backgrounds
+	cAddBg      = lipgloss.AdaptiveColor{Light: "#e6ffec", Dark: "#12261e"}
+	cDelBg      = lipgloss.AdaptiveColor{Light: "#ffebe9", Dark: "#2d1a1f"}
+	cHunkBg     = lipgloss.AdaptiveColor{Light: "#ddf4ff", Dark: "#1c2a3f"}
+	sDiffAdd    = lipgloss.NewStyle().Foreground(cGreen).Background(cAddBg)
+	sDiffDel    = lipgloss.NewStyle().Foreground(cRed).Background(cDelBg)
+	sDiffHunk   = lipgloss.NewStyle().Foreground(cCyan).Bold(true).Background(cHunkBg)
+	sDiffHeader = lipgloss.NewStyle().Foreground(cMagenta).Bold(true).Background(cBarBg)
 	sDiffMeta   = lipgloss.NewStyle().Foreground(cDim)
+
+	// section header bands in the status list
+	sSectionBand = lipgloss.NewStyle().Background(cBarBg).Bold(true)
+
+	// popup chrome: solid panel with a title band
+	sPopup = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
+		BorderForeground(cAccent).Background(cBarBg).Padding(1, 3)
+	sPopupTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("#1a1b26")).
+			Background(cAccent).Bold(true).Padding(0, 1)
 
 	// status codes
 	sStatusM = lipgloss.NewStyle().Foreground(cYellow).Bold(true)

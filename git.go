@@ -90,7 +90,19 @@ func (c Commit) ShortHash() string {
 
 func (c Commit) IsMerge() bool { return len(c.Parents) > 1 }
 
-func parseRefs(decoration string) []Ref {
+// isRemoteRef reports whether a short ref name ("origin/main") belongs to a
+// remote. Local branches may contain slashes too (dev/main), so the check is
+// against the actual remote names, never just "contains a slash".
+func isRemoteRef(name string, remotes []string) bool {
+	for _, r := range remotes {
+		if strings.HasPrefix(name, r+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func parseRefs(decoration string, remotes []string) []Ref {
 	var refs []Ref
 	for _, part := range strings.Split(decoration, ",") {
 		name := strings.TrimSpace(part)
@@ -104,13 +116,28 @@ func parseRefs(decoration string) []Ref {
 			refs = append(refs, Ref{Name: "HEAD", Kind: RefHead})
 		case strings.HasPrefix(name, "tag: "):
 			refs = append(refs, Ref{Name: strings.TrimPrefix(name, "tag: "), Kind: RefTag})
-		case strings.Contains(name, "/"):
+		case isRemoteRef(name, remotes):
 			refs = append(refs, Ref{Name: name, Kind: RefRemote})
 		default:
 			refs = append(refs, Ref{Name: name, Kind: RefBranch})
 		}
 	}
 	return refs
+}
+
+// RemoteNames lists the configured remotes ("origin", …).
+func (r *Repo) RemoteNames() []string {
+	out, err := r.git("remote")
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, n := range strings.Split(strings.TrimSpace(out), "\n") {
+		if n != "" {
+			names = append(names, n)
+		}
+	}
+	return names
 }
 
 func (r *Repo) Commits(limit int, allRefs bool) ([]Commit, error) {
@@ -127,6 +154,7 @@ func (r *Repo) Commits(limit int, allRefs bool) ([]Commit, error) {
 		}
 		return nil, err
 	}
+	remotes := r.RemoteNames()
 	var commits []Commit
 	for _, rec := range strings.Split(out, "\x1e") {
 		rec = strings.TrimLeft(rec, "\n")
@@ -148,46 +176,52 @@ func (r *Repo) Commits(limit int, allRefs bool) ([]Commit, error) {
 			c.Parents = strings.Fields(parts[1])
 		}
 		if parts[4] != "" {
-			c.Refs = parseRefs(parts[4])
+			c.Refs = parseRefs(parts[4], remotes)
 		}
 		commits = append(commits, c)
 	}
 	return commits, nil
 }
 
-func (r *Repo) CommitDetails(hash string) ([]string, error) {
+// CommitDetails returns the metadata block and the patch separately so the
+// UI can show them in two stacked panes.
+func (r *Repo) CommitDetails(hash string) (meta, patch []string, err error) {
 	head, err := r.git("show", "-s",
-		"--format=%H%x1f%an <%ae>%x1f%ad%x1f%s%x1f%b",
+		"--format=%H%x1f%an <%ae>%x1f%ad%x1f%s%x1f%b%x1f%P",
 		"--date=format:%Y-%m-%d %H:%M:%S", hash)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	parts := strings.SplitN(strings.TrimRight(head, "\n"), "\x1f", 5)
-	var lines []string
-	if len(parts) == 5 {
-		lines = append(lines,
-			"commit "+parts[0],
-			"author "+parts[1],
-			"date   "+parts[2],
-			"",
-			"  "+parts[3],
+	parts := strings.SplitN(strings.TrimRight(head, "\n"), "\x1f", 6)
+	if len(parts) == 6 {
+		meta = append(meta,
+			"commit  "+parts[0],
+			"author  "+parts[1],
+			"date    "+parts[2],
 		)
+		if p := strings.TrimSpace(parts[5]); p != "" {
+			short := []string{}
+			for _, ph := range strings.Fields(p) {
+				short = append(short, ph[:min(8, len(ph))])
+			}
+			meta = append(meta, "parents "+strings.Join(short, ", "))
+		}
+		meta = append(meta, "", "  "+parts[3])
 		if body := strings.TrimSpace(parts[4]); body != "" {
-			lines = append(lines, "")
+			meta = append(meta, "")
 			for _, l := range strings.Split(body, "\n") {
-				lines = append(lines, "  "+l)
+				meta = append(meta, "  "+l)
 			}
 		}
-		lines = append(lines, "")
 	}
-	patch, err := r.git("show", "--stat", "--patch", "--format=", hash)
+	out, err := r.git("show", "--stat", "--patch", "--format=", hash)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	for _, l := range strings.Split(strings.TrimRight(patch, "\n"), "\n") {
-		lines = append(lines, strings.ReplaceAll(l, "\t", "    "))
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		patch = append(patch, strings.ReplaceAll(l, "\t", "    "))
 	}
-	return lines, nil
+	return meta, patch, nil
 }
 
 // ---- head / status ----
@@ -609,12 +643,15 @@ func isBlockedCheckout(err error) bool {
 }
 
 // CheckoutBranch switches branches and returns a description of what
-// actually happened. Remote branches ("origin/foo") are never checked out
-// directly: git2 switches to (or creates) the local tracking branch and the
-// message says so explicitly.
-func (r *Repo) CheckoutBranch(name string) (string, error) {
-	if i := strings.Index(name, "/"); i >= 0 {
-		local := name[i+1:]
+// actually happened. remote=true means name is "remote/branch": git2 switches
+// to (or creates) the local tracking branch and the message says so. Local
+// branch names may legitimately contain slashes (dev/main).
+func (r *Repo) CheckoutBranch(name string, remote bool) (string, error) {
+	if remote {
+		local := name
+		if i := strings.Index(name, "/"); i >= 0 {
+			local = name[i+1:]
+		}
 		if _, err := r.git("show-ref", "--verify", "--quiet", "refs/heads/"+local); err == nil {
 			if _, err := r.git("checkout", local); err != nil {
 				return "", err

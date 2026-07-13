@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.7.0"
+const version = "0.8.0"
 
 func main() {
 	path := "."

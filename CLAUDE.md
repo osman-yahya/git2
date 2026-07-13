@@ -56,6 +56,13 @@ gofmt -w . && go vet ./...
   panel), isDirtyTreeError → mergeBlockedMsg (commit-first/stash popup). git conflict
   text arrives on STDOUT — `git()` merges stdout into error messages for this.
 - Machine-readable git output uses `%x1f` field / `%x1e` record separators.
+- Remote-ness of a ref is decided against `RemoteNames()` (git remote), NEVER by
+  "contains a slash" — local branches like dev/main are legal. CheckoutBranch takes an
+  explicit remote bool.
+- Commits view right column = Details pane (detailMetaHeight) + Changes pane stacked;
+  patch scrolling math must use bodyHeight-detailMetaHeight-2, not listHeight.
+- Choice popups are mouse-aware; the click mapping assumes renderChoice's layout
+  (title+blank, options, blank+hint inside sPopup padding(1,3)) — keep them in sync.
 
 ## Testing (no real terminal available)
 

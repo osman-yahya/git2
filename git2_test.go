@@ -68,3 +68,20 @@ func TestBuildGraphNoPanicOnRoot(t *testing.T) {
 		t.Fatalf("want 1 row, got %d", len(rows))
 	}
 }
+
+func TestParseRefsSlashBranches(t *testing.T) {
+	remotes := []string{"origin"}
+	refs := parseRefs("HEAD -> dev/main, origin/main, dev/feature, tag: v1.0", remotes)
+	want := map[string]RefKind{
+		"dev/main": RefHead, "origin/main": RefRemote,
+		"dev/feature": RefBranch, "v1.0": RefTag,
+	}
+	for _, r := range refs {
+		if k, ok := want[r.Name]; !ok || k != r.Kind {
+			t.Errorf("ref %q classified as %v, want %v", r.Name, r.Kind, want[r.Name])
+		}
+	}
+	if len(refs) != len(want) {
+		t.Errorf("got %d refs, want %d", len(refs), len(want))
+	}
+}

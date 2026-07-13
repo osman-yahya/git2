@@ -44,8 +44,13 @@ The tab bar switches between four views (`1`–`4`, or click):
 ### ⌥ Commits
 The commit tree across **all** branches: colored lanes with fork/merge
 connectors, badges for HEAD (green), local branches (blue), remotes (gray) and
-tags (amber). The right pane shows the selected commit's metadata, diffstat and
-full colorized patch. `/` filters live by subject, author or hash — `esc` clears.
+tags (amber). Branch names with slashes (`dev/main`) are recognized correctly —
+remote-ness is decided by your actual remote names, never by the slash.
+
+The right column is split in two: **Details** (hash, author, date, parents,
+message) on top and **Changes** (diffstat + patch with tinted add/remove
+backgrounds) below. `d` focuses the changes pane for scrolling. `/` filters
+live by subject, author or hash — `esc` clears.
 
 Act on the selected commit: `c` checks it out (jumping to a local branch when
 one points at it, detached HEAD otherwise; double-click does the same), `m`
@@ -172,7 +177,9 @@ visible. When idle it shows details about the current selection.
 
 Mouse: click a row to select it, **double-click to act** (checkout a commit or
 branch, stage/unstage a file, apply a stash), click a tab to switch views,
-scroll wheel scrolls whichever pane the pointer is over.
+scroll wheel scrolls whichever pane the pointer is over. **Popups are fully
+mouse-driven too**: click an option to run it, click outside to cancel,
+wheel to move the selection.
 
 ## Updating git2
 
