@@ -51,36 +51,42 @@ func (m model) View() string {
 func (m model) renderHeader() string {
 	repoPath := collapseHome(m.repo.Root)
 
-	var parts []string
+	bg := lipgloss.NewStyle().Background(cBarBg)
 	branch := m.head.Branch
 	if branch == "" {
 		branch = "—"
 	}
+	branchChip := sRefBranch.Render("⎇ " + branch)
 	if m.head.Detached {
-		parts = append(parts, "detached @ "+branch)
-	} else {
-		parts = append(parts, "⎇ "+branch)
+		branchChip = sRefTag.Render("● " + branch)
 	}
+	var parts []string
+	parts = append(parts, branchChip)
+	var counts []string
 	if m.head.Ahead > 0 {
-		parts = append(parts, fmt.Sprintf("↑%d", m.head.Ahead))
+		counts = append(counts, sOk.Background(cBarBg).Render(fmt.Sprintf("↑%d", m.head.Ahead)))
 	}
 	if m.head.Behind > 0 {
-		parts = append(parts, fmt.Sprintf("↓%d", m.head.Behind))
+		counts = append(counts, sErr.Background(cBarBg).Bold(false).Render(fmt.Sprintf("↓%d", m.head.Behind)))
 	}
 	if m.head.Dirty > 0 {
-		parts = append(parts, fmt.Sprintf("±%d", m.head.Dirty))
+		counts = append(counts, sStatusM.Background(cBarBg).Render(fmt.Sprintf("±%d", m.head.Dirty)))
 	} else {
-		parts = append(parts, "✓ clean")
+		counts = append(counts, sHeaderInfo.Render("✓"))
 	}
+	parts = append(parts, strings.Join(counts, bg.Render(" ")))
 	if m.head.Merging {
-		parts = append(parts, "⚠ MERGING")
+		parts = append(parts, sConflictMark.Render(" MERGING "))
 	}
 	if m.fetching {
-		parts = append(parts, "⇣ fetching…")
+		parts = append(parts, sHeaderInfo.Render("⇣ fetching…"))
 	} else if !m.head.HasRemote {
-		parts = append(parts, "no remote")
+		parts = append(parts, sHeaderInfo.Render("no remote"))
 	}
-	right := sHeaderInfo.Render(strings.Join(parts, "  "))
+	if m.updateAvail != "" {
+		parts = append(parts, sRefHead.Render("⬆ v"+m.updateAvail+" · git2 update"))
+	}
+	right := strings.Join(parts, bg.Render("  "))
 
 	// the right side (branch, merge state, sync info) always wins over the path;
 	// inner budget is width-2 because sHeader pads one column each side
@@ -318,17 +324,26 @@ func (m model) renderCommitList(width int) string {
 		gw = 1
 	}
 
+	cw := width - 2
+	barOn := lipgloss.NewStyle().Foreground(cAccent).Render("▌")
 	var b strings.Builder
 	for row := 0; row < h && m.offset+row < len(m.visible); row++ {
 		i := m.visible[m.offset+row]
 		c := m.commits[i]
 		selected := m.offset+row == m.sel
-		b.WriteString(m.renderCommitRow(c, m.rows[i], gw, width, selected))
+		if selected {
+			b.WriteString(barOn)
+		} else {
+			b.WriteString(" ")
+		}
+		b.WriteString(m.renderCommitRow(c, m.rows[i], gw, cw, selected))
 		if row < h-1 {
 			b.WriteString("\n")
 		}
 	}
-	return b.String()
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(cw+1).MaxWidth(cw+1).Render(b.String()),
+		scrollbarCol(len(m.visible), m.offset, h))
 }
 
 func (m model) renderCommitRow(c Commit, gr GraphRow, gw, width int, selected bool) string {
@@ -501,28 +516,28 @@ func (m model) renderStatusDiff(width int) string {
 		return sDim.Render("  nothing selected")
 	}
 	hunks := hunkRanges(lines)
-	selStart, selEnd := -1, -1
+	selStart := -1
 	if len(hunks) > 0 {
-		hs := hunks[clamp(m.hunkSel, 0, len(hunks)-1)]
-		selStart, selEnd = hs[0], hs[1]
+		selStart = hunks[clamp(m.hunkSel, 0, len(hunks)-1)][0]
 	}
 	h := m.listHeight()
+	cw := width - 1
 	var b strings.Builder
 	rendered := 0
 	for i := m.diffOff; i < len(lines) && rendered < h; i++ {
 		if i == selStart && m.focus == focusRight {
-			b.WriteString(sHunkSel.Render(truncate(" "+lines[i]+" · space to stage/unstage ", width)))
-		} else if i > selStart && i < selEnd && m.focus == focusRight && strings.HasPrefix(lines[selStart], "@@") {
-			b.WriteString(styleDiffLine(lines[i], width))
+			b.WriteString(sHunkSel.Width(cw).Render(truncate(" "+lines[i]+" · space to stage/unstage ", cw)))
 		} else {
-			b.WriteString(styleDiffLine(lines[i], width))
+			b.WriteString(styleDiffLine(lines[i], cw))
 		}
 		rendered++
 		if rendered < h {
 			b.WriteString("\n")
 		}
 	}
-	return b.String()
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(cw).MaxWidth(cw).Render(b.String()),
+		scrollbarCol(len(lines), m.diffOff, h))
 }
 
 // stashLabel renders a stash description as a branch chip + clean message.
@@ -791,22 +806,19 @@ func (m model) renderDiffLines(lines []string, offset, width int) string {
 	if m.view == viewCommits {
 		h = m.bodyHeight() - m.detailMetaHeight() - 2
 	}
+	cw := width - 1
 	var b strings.Builder
 	rendered := 0
 	for i := offset; i < len(lines) && rendered < h; i++ {
-		b.WriteString(styleDiffLine(lines[i], width))
+		b.WriteString(styleDiffLine(lines[i], cw))
 		rendered++
 		if rendered < h {
 			b.WriteString("\n")
 		}
 	}
-	// scroll indicator
-	if len(lines) > h {
-		pct := 100 * (offset + min(h, len(lines)-offset)) / len(lines)
-		ind := fmt.Sprintf(" %d%% ", pct)
-		_ = ind
-	}
-	return b.String()
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(cw).MaxWidth(cw).Render(b.String()),
+		scrollbarCol(len(lines), offset, h))
 }
 
 func styleDiffLine(line string, width int) string {
@@ -862,54 +874,87 @@ func (m model) renderChoice() string {
 // ---- help overlay ----
 
 func (m model) renderHelp() string {
-	rows := [][2]string{
-		{"1 2 3 4 / tab", "switch view (tab cycles, shift+tab back)"},
-		{"← → / a d / h l", "switch pane focus"},
-		{"↑ ↓ / w s / j k", "move selection / scroll"},
-		{"ctrl+d ctrl+u", "half-page down / up"},
-		{"g / G", "jump to top / bottom"},
-		{"enter", "focus diff · checkout branch · apply stash"},
+	type row struct{ k, v string }
+	section := func(title string, rows []row) string {
+		var b strings.Builder
+		b.WriteString(sPopupTitle.Render(" "+title+" ") + "\n")
+		for _, r := range rows {
+			b.WriteString(fmt.Sprintf("%s %s\n",
+				sHelpKey.Background(cBarBg).Width(15).Render(r.k),
+				sText.Background(cBarBg).Render(r.v)))
+		}
+		return b.String()
+	}
+	left := section("Navigate", []row{
+		{"↑↓ / ws / jk", "move · scroll"},
+		{"tab / 1-4", "switch view"},
+		{"a / d", "focus list ↔ details"},
+		{"g G · ctrl+d u", "top/bottom · half page"},
 		{"/", "search commits"},
-		{"c", "checkout commit (commits) · commit staged (status)"},
-		{"t", "toggle branch focus / all branches (commits view)"},
-		{"b", "switch branch popup (commits view)"},
-		{"n", "new branch — from commit (commits) or HEAD (branches)"},
-		{"y / R / v", "cherry-pick · rebase onto · revert (commits view)"},
-		{"a / d", "focus files ↔ details pane (highlighted border)"},
-		{"⏎ / u / t", "resolve conflict: popup · ours · theirs (status)"},
-		{"[ ] + space", "select & stage/unstage single hunks (diff pane)"},
-		{"B", "blame file (status view)"},
-		{"D", "discard file changes (status view)"},
-		{"A", "amend last commit (status view)"},
-		{"H", "file history (status view, toggles with diff)"},
-		{"T", "create / delete tag on commit"},
-		{"e / x", "rename / delete branch (branches view)"},
-		{"X", "abort merge (status view, during a merge)"},
-		{"dbl-click", "checkout · stage/unstage · apply stash"},
-		{"space", "stage / unstage file"},
-		{"S", "stash working tree (status view)"},
-		{"m", "merge selected commit / branch into current"},
-		{"O", "open pull-request page in browser (branches view)"},
-		{"f", "fetch all remotes (auto every 3 min)"},
-		{"p", "pull (fast-forward) · pop stash"},
-		{"P / F", "push · force-push with lease"},
-		{"o", "add / show origin remote"},
-		{"x", "drop stash"},
-		{"r", "refresh"},
-		{"?", "toggle this help"},
-		{"q", "quit"},
-	}
-	var b strings.Builder
-	b.WriteString(sBright.Render("git2 — keyboard reference") + "\n\n")
-	for _, r := range rows {
-		b.WriteString(fmt.Sprintf("%s  %s\n",
-			sHelpKey.Width(17).Render(r[0]), sText.Render(r[1])))
-	}
-	return sHelpBox.Render(strings.TrimRight(b.String(), "\n"))
+		{"?", "this help · q quit"},
+	}) + "\n" + section("Commits", []row{
+		{"c / dbl-click", "checkout (picker if multi)"},
+		{"b · t", "branch popup · focus mode"},
+		{"n · T", "new branch · tag"},
+		{"m y R v", "merge · pick · rebase · revert"},
+	})
+	right := section("Status", []row{
+		{"space", "stage file / hunk"},
+		{"[ ]", "select hunk"},
+		{"D · A", "discard · amend"},
+		{"S · H · B", "stash · history · blame"},
+		{"⏎ u t · X", "resolve conflict · abort"},
+		{"c", "commit → graph"},
+	}) + "\n" + section("Branches & sync", []row{
+		{"⏎ · n e x", "checkout · new/rename/del"},
+		{"m · O", "merge · PR page"},
+		{"f · p · P F", "fetch · pull · push/force"},
+		{"o", "add / show origin"},
+	})
+	cols := lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().MarginRight(3).Render(strings.TrimRight(left, "\n")),
+		strings.TrimRight(right, "\n"))
+	title := sBright.Background(cBarBg).Render("git2 " + version + " — keyboard reference")
+	return sPopup.Render(title + "\n\n" + cols)
 }
 
 func (m model) overlay(base, box string) string {
 	return lipgloss.Place(m.width, m.bodyHeight(), lipgloss.Center, lipgloss.Center, box)
+}
+
+// scrollbarCol draws a slim right-edge scrollbar for a list of rows.
+func scrollbarCol(total, offset, rows int) string {
+	if rows < 1 {
+		rows = 1
+	}
+	var b strings.Builder
+	if total <= rows {
+		for i := 0; i < rows; i++ {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(" ")
+		}
+		return b.String()
+	}
+	thumb := max(rows*rows/total, 1)
+	top := 0
+	if total > rows {
+		top = offset * (rows - thumb) / max(total-rows, 1)
+	}
+	track := sDim.Render("│")
+	bar := lipgloss.NewStyle().Foreground(cAccent).Render("┃")
+	for i := 0; i < rows; i++ {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		if i >= top && i < top+thumb {
+			b.WriteString(bar)
+		} else {
+			b.WriteString(track)
+		}
+	}
+	return b.String()
 }
 
 // ---- text helpers ----

@@ -119,12 +119,13 @@ type model struct {
 	lastClickAt time.Time
 	lastClickY  int
 
-	fetching bool
-	head     HeadInfo
-	showHelp bool
-	flash    string
-	flashErr bool
-	flashAt  time.Time
+	fetching    bool
+	updateAvail string // non-empty: newer release version
+	head        HeadInfo
+	showHelp    bool
+	flash       string
+	flashErr    bool
+	flashAt     time.Time
 }
 
 type statusItem struct {
@@ -231,6 +232,7 @@ type fetchDoneMsg struct {
 }
 type autoFetchMsg struct{}
 type flashTickMsg struct{}
+type updateAvailMsg struct{ version string }
 type openTagPromptMsg struct{ hash string }
 type branchDeleteBlockedMsg struct{ name string }
 
@@ -360,6 +362,17 @@ func (m model) doPush(force bool) tea.Cmd {
 
 func autoFetchTick() tea.Cmd {
 	return tea.Tick(autoFetchEvery, func(time.Time) tea.Msg { return autoFetchMsg{} })
+}
+
+// checkUpdate quietly looks for a newer release once per launch.
+func checkUpdate() tea.Cmd {
+	return func() tea.Msg {
+		latest, err := latestVersion(5 * time.Second)
+		if err != nil || latest == "" || latest == version {
+			return nil
+		}
+		return updateAvailMsg{latest}
+	}
 }
 
 func flashTick() tea.Cmd {
@@ -688,7 +701,7 @@ func fileKey(f FileStatus) string {
 
 func (m model) Init() tea.Cmd {
 	m.loadingLog = true
-	return tea.Batch(m.loadCommits(), m.loadHead(), autoFetchTick(), flashTick())
+	return tea.Batch(m.loadCommits(), m.loadHead(), autoFetchTick(), flashTick(), checkUpdate())
 }
 
 // ---- geometry helpers ----
@@ -941,6 +954,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.reload {
 			return m, m.refresh()
 		}
+		return m, nil
+
+	case updateAvailMsg:
+		m.updateAvail = msg.version
 		return m, nil
 
 	case flashTickMsg:

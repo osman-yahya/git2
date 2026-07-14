@@ -14,27 +14,36 @@ import (
 
 const repoSlug = "osman-yahya/git2"
 
+// latestVersion asks GitHub for the newest release tag ("0.9.0", no v).
+func latestVersion(timeout time.Duration) (string, error) {
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get("https://api.github.com/repos/" + repoSlug + "/releases/latest")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(rel.TagName, "v"), nil
+}
+
 // selfUpdate replaces the running binary with the latest GitHub release.
 // There is no background auto-update: users run `git2 update` (or re-run the
 // install one-liner) when they want the new version.
 func selfUpdate() error {
 	client := &http.Client{Timeout: 60 * time.Second}
 
-	resp, err := client.Get("https://api.github.com/repos/" + repoSlug + "/releases/latest")
+	latest, err := latestVersion(60 * time.Second)
 	if err != nil {
 		return fmt.Errorf("checking latest release: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("checking latest release: HTTP %d", resp.StatusCode)
-	}
-	var rel struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return fmt.Errorf("parsing release info: %w", err)
-	}
-	latest := strings.TrimPrefix(rel.TagName, "v")
 	if latest == version {
 		fmt.Println("git2 " + version + " is already the latest version ✓")
 		return nil

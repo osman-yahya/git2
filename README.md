@@ -60,7 +60,7 @@ irm https://raw.githubusercontent.com/osman-yahya/git2/main/install.ps1 | iex
 
 With Go 1.22+ you can also `go install github.com/osman-yahya/git2@latest`,
 or build from a checkout with `make install` (`PREFIX=~/.local` for no sudo).
-Update later with `git2 update`.
+Update later with `git2 update` — the header shows an ⬆ pill when a new release is out.
 
 Full platform guides, including manual installs and PATH setup:
 

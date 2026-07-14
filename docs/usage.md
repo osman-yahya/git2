@@ -192,3 +192,7 @@ git2 update
 It downloads the latest binary for your platform and replaces itself in place
 (on Windows a `git2.exe.old` leftover may remain — safe to delete). Re-running
 the install one-liner does the same thing.
+
+git2 also checks for new releases quietly at startup: when one exists, the
+header shows an **⬆ update pill** with the version — run `git2 update` when
+convenient. No data is sent anywhere; it's a single GitHub API request.
