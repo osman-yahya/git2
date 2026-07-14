@@ -41,9 +41,12 @@ gofmt -w . && go vet ./...
   `checkoutBlockedMsg`). All checkouts go through `m.doCheckout` so the popup logic
   stays centralized.
 - Key aliases everywhere: arrows / `w s a d` / `j k h l`. `s` means *down*, so it can't
-  be a mnemonic (stage = `space`, stash = `S`). `tab` cycles views (not panes!); pane
-  focus is ONLY `a d / h l` — arrows deliberately never switch panes (user request).
-  Focused pane renders with ThickBorder + ▶ in the title. New keys must be added to the footer hints and the `?` help
+  be a mnemonic (stage = `space`, stash = `S`). Since v0.10 the LAYOUT is sidebar+main:
+  `tab` cycles focus zones (focusSide → focusLeft → focusRight via focusOrder); `a d /
+  h l` step zones; arrows never change focus. Sidebar items are sbItems (rebuildSidebar
+  from branches/tags/stashes/files); activation via activateSidebar sets graphRef
+  ("" = --all) and switches view. viewBranches is gone; viewStashes = full-width stash
+  diff for sidebar stash selection. Focused pane renders ThickBorder + ▶. New keys must be added to the footer hints and the `?` help
   overlay in views.go, plus docs/usage.md and README.
 - Flash messages via `m.setFlash()` only (auto-cleared by flashTick after ~4s); never
   assign m.flash directly.
@@ -90,12 +93,13 @@ For remote-feature tests, use a local bare repo (`git init --bare origin.git`) a
   remote HEADs by the FULL refname or a phantom "origin" branch appears whose checkout
   detaches HEAD.
 - Never drive the `O` (open PR) key in PTY tests — it really opens the user's browser.
-- The View is a strict height budget: header 1 + tab bar 2 (label + underline) + body
-  (`bodyHeight` = h-5) + message line 1 + footer 1. Confirm/prompt/search/flash render on
+- The View is a strict height budget: header 1 + body (`bodyHeight` = h-3) + message
+  line 1 + footer 1 (the tab bar is gone — the sidebar replaced it). Confirm/prompt/search/flash render on
   the message line (renderMsgLine); the footer is hints-only and must stay MaxHeight(1). If any bar wraps (long footer hints!) bubbletea trims
   the TOP line — the header silently disappears. Keep footers MaxHeight(1) and short.
 - `git status --porcelain` shows untracked dirs as one `dir/` entry — always pass `-uall`.
-- Mouse row mapping starts at msg.Y-4 (header + 2-line tabs + border).
+- Mouse row mapping starts at msg.Y-2 (header + border); x < sbWidth() is the sidebar;
+  popup click math assumes top = 1+(bodyH-popupH)/2 and options at top+4.
 
 ## Release process
 

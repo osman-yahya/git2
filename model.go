@@ -38,9 +38,41 @@ const (
 )
 
 const (
-	focusLeft = iota
-	focusRight
+	focusLeft  = iota // main list
+	focusRight        // detail pane
+	focusSide         // sidebar
 )
+
+// focus order for a/d/tab cycling: sidebar → list → detail
+var focusOrder = []int{focusSide, focusLeft, focusRight}
+
+func focusPos(f int) int {
+	for i, v := range focusOrder {
+		if v == f {
+			return i
+		}
+	}
+	return 1
+}
+
+// sidebar item kinds
+const (
+	sbHeader = iota
+	sbChanges
+	sbAllCommits
+	sbBranch
+	sbRemote
+	sbTag
+	sbStash
+)
+
+type sbItem struct {
+	kind    int
+	label   string
+	name    string // ref / stash ref
+	current bool
+	idx     int // stash index
+}
 
 type model struct {
 	repo   *Repo
@@ -51,7 +83,7 @@ type model struct {
 	focus int
 
 	// commits view
-	allRefs    bool // true = graph shows --all; false = current branch only
+	graphRef   string // "" = all refs; else branch/tag the graph is focused on
 	commits    []Commit
 	rows       []GraphRow
 	visible    []int // indices into commits (filtered by search)
@@ -87,6 +119,12 @@ type model struct {
 	brLog    []string
 	brLogFor string
 	brLogOff int
+
+	// sidebar
+	sbItems []sbItem
+	sbSel   int
+	sbOff   int
+	tags    []Tag
 
 	// stashes view
 	stashes   []Stash
@@ -165,7 +203,6 @@ func newModel(repo *Repo) model {
 
 	return model{
 		repo:        repo,
-		allRefs:     true,
 		searchInput: si,
 		promptInput: pi,
 	}
@@ -247,6 +284,10 @@ type mergeBlockedMsg struct {
 }
 type jumpStatusMsg struct{ note string }
 type branchPopupMsg struct{ branches []Branch }
+type tagsMsg struct {
+	tags []Tag
+	err  error
+}
 
 type choiceOption struct {
 	label string
@@ -266,11 +307,85 @@ type checkoutBlockedMsg struct {
 
 func (m model) loadCommits() tea.Cmd {
 	r := m.repo
-	all := m.allRefs
+	ref := m.graphRef
 	return func() tea.Msg {
-		commits, err := r.Commits(commitLimit, all)
+		commits, err := r.Commits(commitLimit, ref)
 		return commitsMsg{commits, err}
 	}
+}
+
+func (m model) loadTags() tea.Cmd {
+	r := m.repo
+	return func() tea.Msg {
+		tags, err := r.Tags()
+		return tagsMsg{tags, err}
+	}
+}
+
+// rebuildSidebar assembles the navigation list from loaded repo data.
+func (m *model) rebuildSidebar() {
+	m.sbItems = m.sbItems[:0]
+	add := func(it sbItem) { m.sbItems = append(m.sbItems, it) }
+	changes := ""
+	if n := len(m.files); n > 0 {
+		changes = fmt.Sprintf(" (%d)", n)
+	}
+	add(sbItem{kind: sbChanges, label: "± Changes" + changes})
+	add(sbItem{kind: sbAllCommits, label: "⌥ All Commits"})
+	var locals, remotes []Branch
+	for _, b := range m.branches {
+		if b.Remote {
+			remotes = append(remotes, b)
+		} else {
+			locals = append(locals, b)
+		}
+	}
+	if len(locals) > 0 {
+		add(sbItem{kind: sbHeader, label: "BRANCHES"})
+		for _, b := range locals {
+			add(sbItem{kind: sbBranch, label: b.Name, name: b.Name, current: b.Current})
+		}
+	}
+	if len(remotes) > 0 {
+		add(sbItem{kind: sbHeader, label: "REMOTES"})
+		for _, b := range remotes {
+			add(sbItem{kind: sbRemote, label: b.Name, name: b.Name})
+		}
+	}
+	if len(m.tags) > 0 {
+		add(sbItem{kind: sbHeader, label: "TAGS"})
+		for _, t := range m.tags {
+			add(sbItem{kind: sbTag, label: t.Name, name: t.Name})
+		}
+	}
+	if len(m.stashes) > 0 {
+		add(sbItem{kind: sbHeader, label: "STASHES"})
+		for i, st := range m.stashes {
+			_, msg := stashMeta(st.Desc)
+			add(sbItem{kind: sbStash, label: truncate(msg, 40), name: st.Ref, idx: i})
+		}
+	}
+	if m.sbSel >= len(m.sbItems) {
+		m.sbSel = 0
+	}
+	// never rest on a header
+	if len(m.sbItems) > 0 && m.sbItems[m.sbSel].kind == sbHeader {
+		m.sbSel = m.nextSelectable(m.sbSel, 1)
+	}
+}
+
+func (m model) nextSelectable(from, dir int) int {
+	i := from
+	for n := 0; n < len(m.sbItems); n++ {
+		i += dir
+		if i < 0 || i >= len(m.sbItems) {
+			return from
+		}
+		if m.sbItems[i].kind != sbHeader {
+			return i
+		}
+	}
+	return from
 }
 
 func (m model) loadDetails(hash string) tea.Cmd {
@@ -701,13 +816,16 @@ func fileKey(f FileStatus) string {
 
 func (m model) Init() tea.Cmd {
 	m.loadingLog = true
-	return tea.Batch(m.loadCommits(), m.loadHead(), autoFetchTick(), flashTick(), checkUpdate())
+	return tea.Batch(m.loadCommits(), m.loadHead(), m.loadBranches(), m.loadTags(),
+		m.loadStashes(), m.loadStatus(), autoFetchTick(), flashTick(), checkUpdate())
 }
 
 // ---- geometry helpers ----
 
-// header (1) + tab bar with its underline (2) + message line (1) + footer (1)
-func (m model) bodyHeight() int { return max(m.height-5, 1) }
+// header (1) + message line (1) + footer (1); the sidebar replaced the tabs
+func (m model) bodyHeight() int { return max(m.height-3, 1) }
+
+func (m model) sbWidth() int { return clamp(m.width/5, 22, 30) }
 
 // listHeight is the number of content rows inside a bordered pane.
 func (m model) listHeight() int { return max(m.bodyHeight()-2, 1) }
@@ -718,11 +836,11 @@ func (m model) detailMetaHeight() int {
 }
 
 func (m model) leftWidth() int {
-	w := m.width * 11 / 20
-	return clamp(w, 30, max(m.width-28, 30))
+	mw := m.width - m.sbWidth()
+	return clamp(mw*11/20, 28, max(mw-26, 28))
 }
 
-func (m model) rightWidth() int { return max(m.width-m.leftWidth(), 20) }
+func (m model) rightWidth() int { return max(m.width-m.sbWidth()-m.leftWidth(), 20) }
 
 func clamp(v, lo, hi int) int {
 	if v < lo {
@@ -827,6 +945,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.files = msg.files
 		m.rebuildStatusRows()
+		m.rebuildSidebar()
 		ensureVisible(m.itemRow(m.fileSel), &m.fileOffset, m.listHeight())
 		if len(m.statusItems) > 0 {
 			return m, m.loadItemDiff(m.statusItems[m.fileSel])
@@ -858,12 +977,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.branches = msg.branches
-		if m.brSel >= len(m.branches) {
-			m.brSel = max(len(m.branches)-1, 0)
-		}
-		ensureVisible(m.brSel, &m.brOffset, m.listHeight())
-		if len(m.branches) > 0 {
-			return m, m.loadBranchLog(m.branches[m.brSel].Name)
+		m.rebuildSidebar()
+		return m, nil
+
+	case tagsMsg:
+		if msg.err == nil {
+			m.tags = msg.tags
+			m.rebuildSidebar()
 		}
 		return m, nil
 
@@ -888,6 +1008,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.stashes = msg.stashes
 		m.rebuildStatusRows()
+		m.rebuildSidebar()
 		if m.stSel >= len(m.stashes) {
 			m.stSel = max(len(m.stashes)-1, 0)
 		}
@@ -1059,33 +1180,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) refresh() tea.Cmd {
-	cmds := []tea.Cmd{m.loadHead()}
-	switch m.view {
-	case viewCommits:
+	cmds := []tea.Cmd{m.loadHead(), m.loadBranches(), m.loadTags(), m.loadStashes(), m.loadStatus()}
+	if m.view == viewCommits {
 		cmds = append(cmds, m.loadCommits())
-	case viewStatus:
-		cmds = append(cmds, m.loadStatus(), m.loadStashes())
-	case viewBranches:
-		cmds = append(cmds, m.loadBranches())
-	case viewStashes:
-		cmds = append(cmds, m.loadStashes())
 	}
 	return tea.Batch(cmds...)
 }
 
 func (m model) switchView(v viewID) (tea.Model, tea.Cmd) {
 	m.view = v
-	m.focus = focusLeft
+	if m.focus == focusRight {
+		m.focus = focusLeft
+	}
 	m.flash = ""
 	switch v {
 	case viewCommits:
 		return m, tea.Batch(m.loadCommits(), m.loadHead())
 	case viewStatus:
 		return m, tea.Batch(m.loadStatus(), m.loadStashes(), m.loadHead())
-	case viewBranches:
-		return m, tea.Batch(m.loadBranches(), m.loadHead())
 	case viewStashes:
-		return m, tea.Batch(m.loadStashes(), m.loadHead())
+		return m, m.loadHead()
 	}
 	return m, nil
 }
@@ -1266,13 +1380,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.flash = ""
 		return m, m.refresh()
 	case "1":
+		m.graphRef = ""
 		return m.switchView(viewCommits)
 	case "2":
 		return m.switchView(viewStatus)
-	case "3":
-		return m.switchView(viewBranches)
-	case "4":
-		return m.switchView(viewStashes)
 	case "f":
 		if !m.head.HasRemote {
 			m.setFlash("no remote configured — press o to add origin", true)
@@ -1313,26 +1424,211 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.openPrompt(promptOrigin, "⇄ origin url: ", "git@github.com:user/repo.git or https://…")
 	case "tab":
-		return m.switchView((m.view + 1) % 4)
+		m.focus = focusOrder[(focusPos(m.focus)+1)%len(focusOrder)]
+		return m, nil
 	case "shift+tab":
-		return m.switchView((m.view + 3) % 4)
+		m.focus = focusOrder[(focusPos(m.focus)+2)%len(focusOrder)]
+		return m, nil
 	case "h", "a":
-		m.focus = focusLeft
+		if p := focusPos(m.focus); p > 0 {
+			m.focus = focusOrder[p-1]
+		}
 		return m, nil
 	case "l", "d":
-		m.focus = focusRight
+		if p := focusPos(m.focus); p < len(focusOrder)-1 {
+			m.focus = focusOrder[p+1]
+		}
 		return m, nil
 	}
 
+	if m.focus == focusSide {
+		return m.handleSidebarKey(key)
+	}
 	switch m.view {
 	case viewCommits:
 		return m.handleCommitsKey(key)
 	case viewStatus:
 		return m.handleStatusKey(key)
-	case viewBranches:
-		return m.handleBranchesKey(key)
 	case viewStashes:
-		return m.handleStashesKey(key)
+		return m.handleStashDiffKey(key)
+	}
+	return m, nil
+}
+
+// handleStashDiffKey scrolls the full-width stash diff (sidebar stash mode).
+func (m model) handleStashDiffKey(key string) (tea.Model, tea.Cmd) {
+	page := m.listHeight()
+	maxOff := max(len(m.stDiff)-m.listHeight(), 0)
+	switch key {
+	case "j", "s", "down":
+		m.stDiffOff = min(m.stDiffOff+1, maxOff)
+	case "k", "w", "up":
+		m.stDiffOff = max(m.stDiffOff-1, 0)
+	case "ctrl+d", "pgdown", " ":
+		m.stDiffOff = min(m.stDiffOff+page/2, maxOff)
+	case "ctrl+u", "pgup":
+		m.stDiffOff = max(m.stDiffOff-page/2, 0)
+	case "g", "home":
+		m.stDiffOff = 0
+	case "G", "end":
+		m.stDiffOff = maxOff
+	case "esc":
+		m.focus = focusSide
+	}
+	return m, nil
+}
+
+// handleSidebarKey drives the navigation column.
+func (m model) handleSidebarKey(key string) (tea.Model, tea.Cmd) {
+	if len(m.sbItems) == 0 {
+		return m, nil
+	}
+	it := m.sbItems[m.sbSel]
+	switch key {
+	case "j", "s", "down":
+		m.sbSel = m.nextSelectable(m.sbSel, 1)
+		ensureVisible(m.sbSel, &m.sbOff, m.listHeight())
+		return m, nil
+	case "k", "w", "up":
+		m.sbSel = m.nextSelectable(m.sbSel, -1)
+		ensureVisible(m.sbSel, &m.sbOff, m.listHeight())
+		return m, nil
+	case "g", "home":
+		m.sbSel = 0
+		if m.sbItems[0].kind == sbHeader {
+			m.sbSel = m.nextSelectable(0, 1)
+		}
+		m.sbOff = 0
+		return m, nil
+	case "enter", " ":
+		return m.activateSidebar(it)
+	case "c":
+		switch it.kind {
+		case sbBranch:
+			if it.current {
+				m.setFlash("already on "+it.name, false)
+				return m, nil
+			}
+			return m, m.doCheckout(it.name, it.name, false, false)
+		case sbRemote:
+			return m, m.doCheckout(it.name, it.name, false, true)
+		case sbTag:
+			return m, m.doCheckout(it.name, it.name, true, false)
+		}
+	case "x":
+		switch it.kind {
+		case sbBranch:
+			if it.current {
+				m.setFlash("cannot delete the branch you are on", true)
+				return m, nil
+			}
+			r := m.repo
+			name := it.name
+			m.confirmMsg = "Delete branch " + name + "? y/N"
+			m.confirmCmd = func() tea.Msg {
+				if err := r.DeleteBranch(name, false); err != nil {
+					if strings.Contains(err.Error(), "not fully merged") {
+						return branchDeleteBlockedMsg{name}
+					}
+					return actionMsg{err: err}
+				}
+				return actionMsg{text: "✓ deleted branch " + name, reload: true}
+			}
+			return m, nil
+		case sbTag:
+			r := m.repo
+			name := it.name
+			m.confirmMsg = "Delete tag " + name + "? y/N"
+			m.confirmCmd = func() tea.Msg {
+				if err := r.DeleteTag(name); err != nil {
+					return actionMsg{err: err}
+				}
+				return actionMsg{text: "✓ deleted tag " + name, reload: true}
+			}
+			return m, nil
+		case sbStash:
+			st := m.stashes[it.idx]
+			r := m.repo
+			m.confirmMsg = "Drop " + st.Ref + "? y/N"
+			m.confirmCmd = func() tea.Msg {
+				if err := r.StashDrop(st.Ref); err != nil {
+					return actionMsg{err: err}
+				}
+				return actionMsg{text: "✓ dropped " + st.Ref, reload: true}
+			}
+			return m, nil
+		}
+	case "e":
+		if it.kind == sbBranch {
+			m.renameFrom = it.name
+			cmd := m.openPrompt(promptRename, "⎇ ", "new name for "+it.name)
+			m.promptInput.SetValue(it.name)
+			return m, cmd
+		}
+	case "n":
+		if it.kind == sbBranch || it.kind == sbChanges || it.kind == sbAllCommits {
+			m.branchBase = ""
+			return m, m.openPrompt(promptBranch, "⎇ ", "new branch name (from "+m.head.Branch+")")
+		}
+	case "m":
+		if it.kind == sbBranch && !it.current {
+			name := it.name
+			m.confirmMsg = "Merge " + name + " into " + m.head.Branch + "? y/N"
+			m.confirmCmd = m.doMergeLike("merge", func(r *Repo) error { return r.Merge(name) },
+				"✓ merged "+name+" into "+m.head.Branch)
+			return m, nil
+		}
+	case "O":
+		if it.kind == sbBranch || it.kind == sbRemote {
+			url := m.repo.RemoteURL("origin")
+			if url == "" {
+				m.setFlash("no origin remote — press o to add one", true)
+				return m, nil
+			}
+			branch := it.name
+			if it.kind == sbRemote {
+				if i := strings.Index(branch, "/"); i >= 0 {
+					branch = branch[i+1:]
+				}
+			}
+			pr := prURL(url, branch)
+			if err := openBrowser(pr); err != nil {
+				m.setFlash("could not open browser: "+pr, true)
+				return m, nil
+			}
+			m.setFlash("✓ opened PR page for "+branch, false)
+			return m, nil
+		}
+	case "p":
+		if it.kind == sbStash {
+			st := m.stashes[it.idx]
+			r := m.repo
+			return m, func() tea.Msg {
+				if err := r.StashPop(st.Ref); err != nil {
+					return actionMsg{err: err}
+				}
+				return actionMsg{text: "✓ popped " + st.Ref, reload: true}
+			}
+		}
+	}
+	return m, nil
+}
+
+// activateSidebar switches the main area to the selected item.
+func (m model) activateSidebar(it sbItem) (tea.Model, tea.Cmd) {
+	switch it.kind {
+	case sbChanges:
+		return m.switchView(viewStatus)
+	case sbAllCommits:
+		m.graphRef = ""
+		return m.switchView(viewCommits)
+	case sbBranch, sbRemote, sbTag:
+		m.graphRef = it.name
+		return m.switchView(viewCommits)
+	case sbStash:
+		m.view = viewStashes
+		m.stSel = it.idx
+		return m, m.loadStashDiff(it.name)
 	}
 	return m, nil
 }
@@ -1492,11 +1788,12 @@ func (m model) handleCommitsKey(key string) (tea.Model, tea.Cmd) {
 		cmd := m.checkoutSelectedCommit()
 		return m, cmd
 	case "t":
-		m.allRefs = !m.allRefs
-		if m.allRefs {
-			m.setFlash("showing all branches", false)
-		} else {
+		if m.graphRef == "" {
+			m.graphRef = m.head.Branch
 			m.setFlash("⎇ branch focus: "+m.head.Branch+" only — t to show all", false)
+		} else {
+			m.graphRef = ""
+			m.setFlash("showing all branches", false)
 		}
 		return m, m.loadCommits()
 	case "b":
@@ -1956,7 +2253,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
 			n := len(m.choiceOptions)
 			popupH := n + 8
-			top := 3 + max((m.bodyHeight()-popupH)/2, 0)
+			top := 1 + max((m.bodyHeight()-popupH)/2, 0)
 			first := top + 4
 			if msg.Y >= first && msg.Y < first+n {
 				m.choiceSel = msg.Y - first
@@ -1975,49 +2272,75 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+
+	inSidebar := msg.X < m.sbWidth()
 	switch msg.Button {
-	case tea.MouseButtonWheelUp:
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		delta := 3
+		if msg.Button == tea.MouseButtonWheelUp {
+			delta = -3
+		}
+		if inSidebar {
+			m.focus = focusSide
+			dir := 1
+			if delta < 0 {
+				dir = -1
+			}
+			for i := 0; i < 3; i++ {
+				m.sbSel = m.nextSelectable(m.sbSel, dir)
+			}
+			ensureVisible(m.sbSel, &m.sbOff, m.listHeight())
+			return m, nil
+		}
+		if m.view == viewStashes {
+			m.stDiffOff = clamp(m.stDiffOff+delta, 0, max(len(m.stDiff)-m.listHeight(), 0))
+			return m, nil
+		}
 		if m.mouseInRight(msg.X) {
 			m.focus = focusRight
-			return m.scrollRight(-3)
+			return m.scrollRight(delta)
 		}
 		m.focus = focusLeft
-		return m.scrollLeft(-3)
-	case tea.MouseButtonWheelDown:
-		if m.mouseInRight(msg.X) {
-			m.focus = focusRight
-			return m.scrollRight(3)
-		}
-		m.focus = focusLeft
-		return m.scrollLeft(3)
+		return m.scrollLeft(delta)
+
 	case tea.MouseButtonLeft:
 		if msg.Action != tea.MouseActionPress {
 			return m, nil
 		}
-		// tab bar row
-		if msg.Y == 1 {
-			pos := 0
-			for i, t := range tabLabels {
-				w := len(t) + 4 // padding 2 each side
-				if msg.X >= pos && msg.X < pos+w {
-					return m.switchView(viewID(i))
-				}
-				pos += w
-			}
-			return m, nil
-		}
-		// list rows: body starts at y=3 (header + 2-line tab bar), +1 border
-		row := msg.Y - 4
+		row := msg.Y - 2 // header + pane border
 		if row < 0 || row >= m.listHeight() {
-			return m, nil
-		}
-		if m.mouseInRight(msg.X) {
-			m.focus = focusRight
 			return m, nil
 		}
 		double := time.Since(m.lastClickAt) < 450*time.Millisecond && m.lastClickY == msg.Y
 		m.lastClickAt = time.Now()
 		m.lastClickY = msg.Y
+
+		if inSidebar {
+			m.focus = focusSide
+			target := m.sbOff + row
+			if target >= len(m.sbItems) || m.sbItems[target].kind == sbHeader {
+				return m, nil
+			}
+			m.sbSel = target
+			it := m.sbItems[target]
+			if double && (it.kind == sbBranch || it.kind == sbRemote) {
+				if it.current {
+					m.setFlash("already on "+it.name, false)
+					return m, nil
+				}
+				return m, m.doCheckout(it.name, it.name, false, it.kind == sbRemote)
+			}
+			return m.activateSidebar(it)
+		}
+
+		if m.view == viewStashes {
+			m.focus = focusLeft
+			return m, nil
+		}
+		if m.mouseInRight(msg.X) {
+			m.focus = focusRight
+			return m, nil
+		}
 		m.focus = focusLeft
 		switch m.view {
 		case viewCommits:
@@ -2055,51 +2378,13 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if itemKey(it) != m.diffFor {
 				return m, m.loadItemDiff(it)
 			}
-		case viewBranches:
-			target := m.brOffset + row
-			if target >= len(m.branches) {
-				return m, nil
-			}
-			if double && target == m.brSel {
-				b := m.branches[target]
-				if b.Current {
-					m.setFlash("already on "+b.Name, false)
-					return m, nil
-				}
-				return m, m.doCheckout(b.Name, b.Name, false, b.Remote)
-			}
-			m.brSel = target
-			b := m.branches[m.brSel]
-			if b.Name != m.brLogFor {
-				return m, m.loadBranchLog(b.Name)
-			}
-		case viewStashes:
-			target := m.stOff + row
-			if target >= len(m.stashes) {
-				return m, nil
-			}
-			if double && target == m.stSel {
-				st := m.stashes[target]
-				r := m.repo
-				return m, func() tea.Msg {
-					if err := r.StashApply(st.Ref); err != nil {
-						return actionMsg{err: err}
-					}
-					return actionMsg{text: "✓ applied " + st.Ref, reload: true}
-				}
-			}
-			m.stSel = target
-			st := m.stashes[m.stSel]
-			if st.Ref != m.stDiffFor {
-				return m, m.loadStashDiff(st.Ref)
-			}
 		}
 		return m, nil
 	}
 	return m, nil
 }
 
-func (m model) mouseInRight(x int) bool { return x >= m.leftWidth() }
+func (m model) mouseInRight(x int) bool { return x >= m.sbWidth()+m.leftWidth() }
 
 func (m model) scrollLeft(delta int) (tea.Model, tea.Cmd) {
 	switch m.view {

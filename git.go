@@ -140,11 +140,14 @@ func (r *Repo) RemoteNames() []string {
 	return names
 }
 
-func (r *Repo) Commits(limit int, allRefs bool) ([]Commit, error) {
+// Commits lists commits reachable from ref (branch/tag); ref "" means all refs.
+func (r *Repo) Commits(limit int, ref string) ([]Commit, error) {
 	format := "%H\x1f%P\x1f%an\x1f%at\x1f%D\x1f%s\x1e"
 	args := []string{"log", "--date-order", "-n", strconv.Itoa(limit), "--pretty=format:" + format}
-	if allRefs {
+	if ref == "" {
 		args = append(args, "--all")
+	} else {
+		args = append(args, ref, "--")
 	}
 	out, err := r.git(args...)
 	if err != nil {
@@ -1034,4 +1037,30 @@ func (r *Repo) Blame(path string) ([]string, error) {
 		lines = append(lines, strings.ReplaceAll(l, "\t", "    "))
 	}
 	return lines, nil
+}
+
+// ---- v0.10: sidebar data ----
+
+type Tag struct {
+	Name string
+	Hash string
+}
+
+func (r *Repo) Tags() ([]Tag, error) {
+	out, err := r.git("for-each-ref", "refs/tags", "--sort=-creatordate",
+		"--format=%(refname:short)\x1f%(objectname:short)")
+	if err != nil {
+		return nil, err
+	}
+	var tags []Tag
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if l == "" {
+			continue
+		}
+		parts := strings.SplitN(l, "\x1f", 2)
+		if len(parts) == 2 {
+			tags = append(tags, Tag{Name: parts[0], Hash: parts[1]})
+		}
+	}
+	return tags, nil
 }

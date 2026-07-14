@@ -9,8 +9,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-var tabLabels = []string{"⌥ Commits", "± Status", "⎇ Branches", "≡ Stashes"}
-
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "loading…"
@@ -18,20 +16,17 @@ func (m model) View() string {
 	var b strings.Builder
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
-	b.WriteString(m.renderTabs())
-	b.WriteString("\n")
 
-	var body string
+	var main string
 	switch m.view {
 	case viewCommits:
-		body = m.renderCommitsView()
+		main = m.renderCommitsView()
 	case viewStatus:
-		body = m.renderStatusView()
-	case viewBranches:
-		body = m.renderBranchesView()
+		main = m.renderStatusView()
 	case viewStashes:
-		body = m.renderStashesView()
+		main = m.renderStashDiffView()
 	}
+	body := lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(), main)
 	if m.showHelp {
 		body = m.overlay(body, m.renderHelp())
 	}
@@ -101,26 +96,79 @@ func (m model) renderHeader() string {
 	return sHeader.Width(m.width).MaxHeight(1).Render(left + pad + right)
 }
 
-func (m model) renderTabs() string {
-	var tabs []string
-	for i, label := range tabLabels {
-		if viewID(i) == m.view {
-			tabs = append(tabs, sTabActive.Render(label))
-		} else {
-			tabs = append(tabs, sTabIdle.Render(label))
+// renderSidebar draws the Fork-style navigation column.
+func (m model) renderSidebar() string {
+	w := m.sbWidth()
+	h := m.listHeight()
+	var b strings.Builder
+	rendered := 0
+	for i := m.sbOff; i < len(m.sbItems) && rendered < h; i++ {
+		it := m.sbItems[i]
+		selected := i == m.sbSel
+		var line string
+		switch it.kind {
+		case sbHeader:
+			line = sSectionBand.Foreground(cDim).Width(w - 2).Render(" " + it.label)
+		default:
+			bg := lipgloss.NewStyle()
+			marker := " "
+			style := sText
+			icon := ""
+			switch it.kind {
+			case sbChanges:
+				icon = ""
+				style = sStatusM
+			case sbAllCommits:
+				icon = ""
+				style = lipgloss.NewStyle().Foreground(cAccent)
+			case sbBranch:
+				icon = "⎇ "
+				if it.current {
+					style = sOk.Bold(true)
+				}
+			case sbRemote:
+				icon = "☁ "
+				style = sDim
+			case sbTag:
+				icon = "⌂ "
+				style = sStatusM
+			case sbStash:
+				icon = "≡ "
+				style = lipgloss.NewStyle().Foreground(cMagenta)
+			}
+			if selected {
+				bg = bg.Background(cSelBg)
+				style = style.Background(cSelBg).Bold(true)
+				marker = lipgloss.NewStyle().Foreground(cAccent).Background(cSelBg).Render("▌")
+			}
+			cur := ""
+			if it.current {
+				cur = "✓ "
+			}
+			label := truncate(cur+icon+it.label, w-4)
+			line = marker + style.Render(label)
+			if pad := w - 2 - lipgloss.Width(line); pad > 0 {
+				line += bg.Render(strings.Repeat(" ", pad))
+			}
+		}
+		b.WriteString(line)
+		rendered++
+		if rendered < h {
+			b.WriteString("\n")
 		}
 	}
-	row := lipgloss.JoinHorizontal(lipgloss.Bottom, tabs...)
-	// fill the rest of the line with a bottom rule
-	fill := m.width - lipgloss.Width(row)
-	if fill > 0 {
-		rule := sDim.Render(strings.Repeat(" ", fill))
-		row = lipgloss.JoinHorizontal(lipgloss.Bottom, row, lipgloss.NewStyle().
-			Border(lipgloss.Border{Bottom: "─"}, false, false, true, false).
-			BorderForeground(cDim).Render(strings.Repeat(" ", fill)))
-		_ = rule
+	return m.paneH("Repository", b.String(), w, m.bodyHeight(), m.focus == focusSide)
+}
+
+// renderStashDiffView shows one stash across the whole main area.
+func (m model) renderStashDiffView() string {
+	w := m.width - m.sbWidth()
+	title := "Stash"
+	if m.stSel < len(m.stashes) {
+		st := m.stashes[m.stSel]
+		title = st.Ref + " · " + truncate(st.Desc, w-30)
 	}
-	return row
+	return m.pane(title, m.renderDiffLines(m.stDiff, m.stDiffOff, w-2), w, m.focus != focusSide)
 }
 
 // renderMsgLine is the dedicated line above the footer: confirmations,
@@ -197,6 +245,16 @@ func statusCodeWord(f FileStatus) string {
 func (m model) renderFooter() string {
 	type hint struct{ key, label string }
 	var hints []hint
+	if m.focus == focusSide {
+		hints = []hint{{"↑↓", "navigate"}, {"⏎", "open"}, {"c", "checkout"}, {"n·e·x", "new·rename·del"},
+			{"m", "merge"}, {"p", "pop stash"}, {"O", "PR"}, {"d", "to main pane"},
+			{"tab", "cycle focus"}, {"?", "help"}, {"q", "quit"}}
+		var parts []string
+		for _, h := range hints {
+			parts = append(parts, sFooterKey.Render(h.key)+sFooter.UnsetPadding().Render(" "+h.label))
+		}
+		return sFooter.Width(m.width).MaxHeight(1).Render(strings.Join(parts, sFooter.UnsetPadding().Render(" · ")))
+	}
 	switch m.view {
 	case viewCommits:
 		hints = []hint{{"c", "checkout"}, {"b", "branch"}, {"t", "focus"}, {"n", "new"}, {"T", "tag"},
@@ -216,9 +274,9 @@ func (m model) renderFooter() string {
 		hints = []hint{{"⏎", "checkout"}, {"n", "new"}, {"e", "rename"}, {"x", "delete"},
 			{"m", "merge"}, {"O", "PR"}, {"p", "pull"}, {"P", "push"}}
 	case viewStashes:
-		hints = []hint{{"⏎", "apply"}, {"p", "pop"}, {"x", "drop"}}
+		hints = []hint{{"↑↓", "scroll"}, {"a", "back to sidebar"}}
 	}
-	hints = append(hints, hint{"tab", "views"}, hint{"?", "help"}, hint{"q", "quit"})
+	hints = append(hints, hint{"a/d", "panes"}, hint{"tab", "cycle focus"}, hint{"?", "help"}, hint{"q", "quit"})
 
 	var parts []string
 	for _, h := range hints {
@@ -272,9 +330,9 @@ func (m model) paneH(title, content string, width, height int, focused bool) str
 
 func (m model) renderCommitsView() string {
 	lw, rw := m.leftWidth(), m.rightWidth()
-	title := fmt.Sprintf("Commits · %d", len(m.visible))
-	if !m.allRefs {
-		title = fmt.Sprintf("Commits · ⎇ %s · %d", m.head.Branch, len(m.visible))
+	title := fmt.Sprintf("All Commits · %d", len(m.visible))
+	if m.graphRef != "" {
+		title = fmt.Sprintf("⎇ %s · %d", m.graphRef, len(m.visible))
 	}
 	if m.query != "" {
 		title = fmt.Sprintf("Commits · %d/%d · “%s”", len(m.visible), len(m.commits), m.query)

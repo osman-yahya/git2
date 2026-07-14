@@ -37,9 +37,36 @@ Cache location:
 
 Delete the file to reset history.
 
-## Views
+## Layout — the sidebar
 
-The tab bar switches between four views (`1`–`4`, or click):
+git2 uses a Fork-style layout: a **Repository sidebar** on the left with
+everything in one place, and the main area on the right.
+
+```
+± Changes (3)        ← working tree (click or ⏎ opens it; 2 jumps here)
+⌥ All Commits        ← the full graph (1 jumps here)
+BRANCHES             ← ✓ marks the branch you're on
+  ✓ main
+    dev/main
+REMOTES
+    origin/main
+TAGS
+    v1.0
+STASHES
+    wip: sidebar…
+```
+
+- `⏎` (or click) a **branch / remote / tag** → the graph focuses on it
+- `⏎` a **stash** → full-width stash diff; `p` pops, `x` drops it
+- On a branch: `c` checkout (double-click too), `n` new, `e` rename,
+  `x` delete, `m` merge into current, `O` open PR
+- On a tag: `c` checkout (detached), `x` delete
+
+**Focus** cycles sidebar → list → details with `tab` (back with
+`shift+tab`), or step with `a`/`d`. The focused pane always has the thick
+bright border with `▶` in its title.
+
+## Main views
 
 ### ⌥ Commits
 The commit tree across **all** branches: colored lanes with fork/merge
@@ -136,8 +163,9 @@ keys stay in the list so they never jump panes by surprise):
 | Key | Action |
 | --- | --- |
 | `↑ ↓` / `w s` / `j k` | move selection · scroll |
-| `tab` / `shift+tab` | next / previous view |
-| `a` / `d` (or `h` / `l`) | focus the list ↔ the details pane |
+| `tab` / `shift+tab` | cycle focus: sidebar → list → details |
+| `a` / `d` (or `h` / `l`) | step focus left / right |
+| `1` / `2` | jump to All Commits / Changes |
 | `ctrl+d` `ctrl+u` / `pgdn` `pgup` | half-page jump |
 | `g` / `G` | top / bottom |
 | `enter` | focus diff · checkout branch · resolve conflict |
@@ -166,7 +194,6 @@ keys stay in the list so they never jump panes by surprise):
 | `P` / `F` | push · force-push (with lease) |
 | `o` | add / show origin |
 | `x` | drop stash |
-| `1` `2` `3` `4` | jump to view |
 | `r` | refresh |
 | `?` | help overlay |
 | `q` / `ctrl+c` | quit |

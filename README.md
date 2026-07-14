@@ -38,6 +38,9 @@ it offers your recent repos and a directory browser to pick one.
   ff-only pull, push that auto-creates the remote branch, force-push with lease; auth rides
   on your existing SSH keys / credential helper ([details](docs/remotes.md))
 - **Stashes** — stash with untracked files (`S`), preview diffs, apply / pop / drop
+- **Fork-style sidebar** — Changes (with count), All Commits, and every branch, remote,
+  tag and stash in one always-visible column; click or ⏎ focuses the graph on any ref,
+  branch admin happens right there
 - **Repo picker** — launched outside a repo? Choose from recent repos, browse the
   filesystem, clone a URL (`c`) or init a new repo (`i`); the last location is remembered
 - **Controls that fit your hands** — arrows, WASD, or vim keys; full mouse support
@@ -86,9 +89,8 @@ See the **[usage guide](docs/usage.md)** for the picker, views, and every keybin
 | Key | Action |
 | --- | --- |
 | `↑ ↓` / `w s` / `j k` | move · scroll |
-| `tab` | next view |
-| `a` / `d` | focus list ↔ details pane |
-| `1` `2` `3` `4` | Commits · Status · Branches · Stashes |
+| `tab` / `a` `d` | cycle focus: sidebar → list → details |
+| `1` / `2` | All Commits · Changes |
 | `enter` | focus diff · checkout branch |
 | `c` / `y` / `R` / `v` | checkout · pick · rebase · revert commit |
 | `O` | open PR in browser |
